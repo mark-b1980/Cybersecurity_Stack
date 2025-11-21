@@ -1,0 +1,21 @@
+services:
+  velociraptor-server:
+    image: wlambert/velociraptor:latest
+    container_name: velociraptor-server
+    
+    volumes:
+      - ./data:/velociraptor/:rw
+    
+    environment:
+      - VELOX_USER=admin
+      - VELOX_PASSWORD=${PASSWORD}
+      - VELOX_ROLE=administrator
+      - VELOX_SERVER_URL=https://${SERVER_IP}:8000/
+      - VELOX_FRONTEND_HOSTNAME=${SERVER_IP}
+    
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8889:8889"
+    
+    restart: unless-stopped
