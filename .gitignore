@@ -1,0 +1,6 @@
+# Data- and config-folders
+**/data/*
+
+# ENV-file storing the passwords and other data
+**/.env
+
