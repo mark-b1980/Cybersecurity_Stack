@@ -20,15 +20,31 @@ script_dir=$(pwd)
 # Install needed tools
 ################################################################################################
 apt update
-apt install -y openssh-server docker.io docker-compose ufw htop cron 
+apt install -y openssh-server docker.io docker-compose ufw htop cron python3-venv
 systemctl enable sshd
 systemctl start sshd
 
 ################################################################################################
 # Configure firewall
 ################################################################################################
-ufw allow 22/tcp
-ufw allow 8889/tcp
+# SSH for management purposes
+ufw allow 22/tcp   # SSH access for management purposes
+
+# Velociraptor
+ufw allow 8000/tcp # Velociraptor client-server communication
+ufw allow 8001/tcp # Velociraptor client-server communication
+ufw allow 8889/tcp # Velociraptor web interface
+
+# GVM
+ufw allow 2222/tcp # GVM SSH
+ufw allow 9392/tcp # GVM web interface
+
+# ELK Stack
+ufw allow 5601/tcp # Kibana
+ufw allow 9200/tcp # Elasticsearch
+ufw allow 9000/tcp # Logstash
+ufw allow 5141/udp # Syslog input for pfSense
+
 ufw enable
 ufw status
 
@@ -38,6 +54,11 @@ ufw status
 getent group docker || groupadd docker
 read -p "Enter the username to add to the docker group: " USER_NAME
 usermod -aG docker $USER_NAME
+
+################################################################################################
+# Setup venv
+################################################################################################
+python3 -m venv stack_venv
 
 ################################################################################################
 # Run the setup script of each component
