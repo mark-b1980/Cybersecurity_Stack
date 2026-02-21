@@ -1,0 +1,31 @@
+# 1. Allow packet manager all
+allow exe=/usr/bin/dpkg : all
+allow exe=/usr/bin/apt : all
+allow exe=/usr/bin/apt-get : all
+
+# 2. Trust the apps in the trust DB 
+allow stats=0 trust=1 : all
+
+# 3. Allow regular application paths
+allow perm=any all : dir=/bin/
+allow perm=any all : dir=/sbin/
+allow perm=any all : dir=/usr/bin/
+allow perm=any all : dir=/usr/sbin/
+allow perm=any all : dir=/usr/lib/
+allow perm=any all : dir=/usr/local/bin/
+allow perm=any all : dir=/usr/local/lib/
+
+# 4. Allow shared libs
+allow perm=any all : dir=/lib/
+allow perm=any all : dir=/lib64/
+allow perm=any all : dir=/boot/
+
+# 5. Block all temp. paths
+# deny_audit create a log entry when soemthing is blocked
+deny_audit perm=any all : dir=/tmp/
+deny_audit perm=any all : dir=/var/tmp/
+deny_audit perm=any all : dir=/home/
+deny_audit perm=any all : dir=/dev/shm/
+
+# 6. Default Deny
+deny_audit perm=any all : all

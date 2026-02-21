@@ -1,0 +1,168 @@
+<AppLockerPolicy Version="1">
+  <RuleCollection Type="Appx" EnforcementMode="AuditOnly">
+    <FilePublisherRule Id="a9e18c21-ff8f-43cf-b9fc-db40eed693ba" Name="(Standardregel) Alle signierten App-Pakete" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen von signierten App-Paketen." UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePublisherCondition PublisherName="*" ProductName="*" BinaryName="*">
+          <BinaryVersionRange LowSection="0.0.0.0" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </FilePublisherRule>
+  </RuleCollection>
+  <RuleCollection Type="Dll" EnforcementMode="AuditOnly">
+    <FilePathRule Id="13ce1276-4235-43c1-8ef0-cb6914620a60" Name="%WINDIR%\Registration\CRMLog\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Registration\CRMLog\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="1ea27ed6-f67d-4782-9694-f9602d2f8652" Name="%WINDIR%\System32\spool\drivers\color" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\System32\spool\drivers\color" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="3737732c-99b7-41d4-9037-9cddfb0de0d0" Name="(Standardregel) Alle DLLs im Ordner &quot;Programme&quot;" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Laden von DLLs im Ordner &quot;Programme&quot;" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%PROGRAMFILES%\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="37e2a0ad-1390-431f-8cfb-e1752b4ee141" Name="%WINDIR%\System32\com\dmp" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\System32\com\dmp" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="38f84f5b-fbd2-4402-8957-fbd6acee2eed" Name="%WINDIR%\ServiceProfiles\LocalService\AppData\Local\Temp" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\ServiceProfiles\LocalService\AppData\Local\Temp" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="59fd419c-7228-454b-a7e2-db5fff9d6c3b" Name="%WINDIR%\Temp\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Temp\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="604f63de-386b-485b-8cc9-1577cf63d656" Name="%WINDIR%\Tracing\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Tracing\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="bac4b0bf-6f1b-40e8-8627-8545fa89c8b6" Name="(Standardregel) Microsoft Windows-DLLs" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Laden von DLLs im Ordner &quot;Windows&quot;" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="d683a0e8-0175-42d5-b721-9cef47a82971" Name="%WINDIR%\Tasks\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Tasks\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="f74712a0-e722-4715-9a88-b7f345eb04d2" Name="%WINDIR%\System32\Microsoft\Crypto\RSA\MachineKeys" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\System32\Microsoft\Crypto\RSA\MachineKeys" />
+      </Conditions>
+    </FilePathRule>
+  </RuleCollection>
+  <RuleCollection Type="Exe" EnforcementMode="AuditOnly">
+    <FilePublisherRule Id="2145988a-d83f-467d-b794-c4dddc36ac56" Name="Alle signierten Programme" Description="" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePublisherCondition PublisherName="*" ProductName="*" BinaryName="*">
+          <BinaryVersionRange LowSection="*" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </FilePublisherRule>
+    <FilePathRule Id="921cc481-6e17-4653-8f75-050b80acca20" Name="(Standardregel) Alle Dateien im Ordner &quot;Programme&quot;" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen von Anwendungen, die sich im Ordner &quot;Programme&quot; befinden" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%PROGRAMFILES%\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="9cf64dc6-3a58-4aa1-bd8c-729cb71dec18" Name="%WINDIR%\Temp\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Temp\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="a61c8b2c-a319-4cd0-9690-d2177cad7b51" Name="(Standardregel) Alle Dateien im Ordner &quot;Windows&quot;" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen von Anwendungen, die sich im Ordner &quot;Windows&quot; befinden" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="af5e5bbf-c2d6-465d-a3ee-9f8941027e0c" Name="%WINDIR%\Tasks\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Tasks\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="c73241ea-8183-48bc-8e67-9cd1fc805d38" Name="%WINDIR%\System32\Microsoft\Crypto\RSA\MachineKeys" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\System32\Microsoft\Crypto\RSA\MachineKeys" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="c9b1b20f-a975-4c81-bc09-f947599003fb" Name="%WINDIR%\Registration\CRMLog\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Registration\CRMLog\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="da068410-e349-4202-9649-366f56c5a138" Name="%WINDIR%\System32\spool\drivers\color" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\System32\spool\drivers\color" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="e1d563c0-a7a7-4797-bebf-5287fc1d6b12" Name="%WINDIR%\Tracing\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Tracing\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="e9272394-3c6f-4817-9eff-3cea343290d6" Name="%WINDIR%\ServiceProfiles\LocalService\AppData\Local\Temp" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\ServiceProfiles\LocalService\AppData\Local\Temp" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="ec0886e3-ff25-4602-9801-d8e00ee24299" Name="%WINDIR%\System32\com\dmp" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\System32\com\dmp" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="7d844dfe-b1df-411a-815f-94981ea97801" Name="*.scr" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="*.scr" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="27b3e0df-5f8f-4cea-b491-a2a9f7351277" Name="*.com" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="*.com" />
+      </Conditions>
+      <Exceptions>
+        <FilePublisherCondition PublisherName="O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US" ProductName="*" BinaryName="*">
+          <BinaryVersionRange LowSection="*" HighSection="*" />
+        </FilePublisherCondition>
+      </Exceptions>
+    </FilePathRule>
+  </RuleCollection>
+  <RuleCollection Type="Msi" EnforcementMode="AuditOnly">
+    <FilePublisherRule Id="b7af7102-efde-4369-8a89-7a6a392d1473" Name="(Standardregel) Alle digital signierten Windows Installer-Dateien" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen von digital signierten Windows Installer-Dateien" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePublisherCondition PublisherName="*" ProductName="*" BinaryName="*">
+          <BinaryVersionRange LowSection="0.0.0.0" HighSection="*" />
+        </FilePublisherCondition>
+      </Conditions>
+    </FilePublisherRule>
+    <FilePathRule Id="5b290184-345a-4453-b184-45305f6d9a54" Name="(Standardregel) Alle Windows Installer-Dateien unter &quot;%systemdrive%\Windows\Installer&quot;" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen aller Windows Installer-Dateien, die sich unter &quot;%systemdrive%\Windows\Installer&quot; befinden." UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Installer\*" />
+      </Conditions>
+    </FilePathRule>
+  </RuleCollection>
+  <RuleCollection Type="Script" EnforcementMode="AuditOnly">
+    <FilePathRule Id="06dce67b-934c-454f-a263-2515c8796a5d" Name="(Standardregel) Alle Skripts im Ordner &quot;Programme&quot;" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen von Skripts, die sich im Ordner &quot;Programme&quot; befinden" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%PROGRAMFILES%\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="5f385647-6abe-4e15-a301-260f02edaf83" Name="%WINDIR%\Temp\*" Description="" UserOrGroupSid="S-1-1-0" Action="Deny">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\Temp\*" />
+      </Conditions>
+    </FilePathRule>
+    <FilePathRule Id="9428c672-5fc3-47f4-808a-a0011f36dd2c" Name="(Standardregel) Alle Skripts im Ordner &quot;Windows&quot;" Description="Ermöglicht Mitgliedern der Gruppe &quot;Jeder&quot; das Ausführen von Skripts, die sich im Ordner &quot;Windows&quot; befinden" UserOrGroupSid="S-1-1-0" Action="Allow">
+      <Conditions>
+        <FilePathCondition Path="%WINDIR%\*" />
+      </Conditions>
+    </FilePathRule>
+  </RuleCollection>
+</AppLockerPolicy>
