@@ -4,3 +4,13 @@
 # ENV-file storing the passwords and other data
 **/.env
 
+# Certs
+**/*.ca
+**/*.crt
+**/*.key
+
+# Venv-folder
+stack_venv/*
+
+# unwanted stuff
+000_schrott/*

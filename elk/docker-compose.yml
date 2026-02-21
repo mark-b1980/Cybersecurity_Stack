@@ -1,0 +1,321 @@
+volumes:
+  certs:
+    driver: local
+  esdata01:
+    driver: local
+  kibanadata:
+    driver: local
+  metricbeatdata01:
+    driver: local
+  filebeatdata01:
+    driver: local
+  logstashdata01:
+    driver: local
+
+networks:
+  default:
+    name: elastic
+    external: false
+
+services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    user: "0"
+    command:
+      - bash
+      - -euo
+      - pipefail
+      - -c
+      - |
+        # --- Generate CA + certs (once) ---
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "Creating CA"
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip
+          unzip -q config/certs/ca.zip -d config/certs
+        fi
+
+        if [ ! -f config/certs/certs.zip ]; then
+          echo "Creating certs"
+          cat > config/certs/instances.yml <<YAML
+        instances:
+          - name: es01
+            dns: [es01, localhost]
+            ip: [127.0.0.1, ${ELASTIC_IP}]
+          - name: kibana
+            dns: [kibana, localhost]
+            ip: [127.0.0.1, ${ELASTIC_IP}]
+          - name: fleet-server
+            dns: [fleet-server, localhost]
+            ip: [127.0.0.1, ${ELASTIC_IP}]
+        YAML
+
+          bin/elasticsearch-certutil cert --silent --pem \
+            --in config/certs/instances.yml \
+            --ca-cert config/certs/ca/ca.crt \
+            --ca-key  config/certs/ca/ca.key \
+            -out config/certs/certs.zip
+          unzip -q config/certs/certs.zip -d config/certs
+        fi
+
+        echo "Setting file permissions"
+        chown -R root:root config/certs
+        find config/certs -type d -exec chmod 750 {} \;
+        find config/certs -type f -exec chmod 640 {} \;
+
+        # --- Wait for Elasticsearch ---
+        echo "Waiting for Elasticsearch availability"
+        until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 5; done
+
+        # --- Set kibana_system password in ES (kept as you had it) ---
+        echo "Setting kibana_system password"
+        until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            https://es01:9200/_security/user/kibana_system/_password \
+            -d "{\"password\":\"${ELASTIC_PASSWORD}\"}" | grep -q "^{}"; do sleep 5; done
+
+        # --- Initialize Fleet in Kibana ---
+        echo "Waiting for Kibana API"
+        until curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana:5601/api/status | grep -q "\"level\":\"available\""; do sleep 5; done
+
+        echo "Running Fleet setup"
+        until curl -s -u "elastic:${ELASTIC_PASSWORD}" -H "kbn-xsrf: 1" \
+              -X POST http://kibana:5601/api/fleet/setup \
+              | grep -Eq "\"isInitialized\":true|\"status\":\"READY\""; do sleep 5; done
+
+        echo "Ensuring default Fleet Server policy exists"
+        if ! curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana:5601/api/fleet/agent_policies \
+            | grep -q "\"is_default_fleet_server\":true"; then
+          echo "Creating default Fleet Server policy"
+          curl -s -u "elastic:${ELASTIC_PASSWORD}" -H "kbn-xsrf: 1" -H "Content-Type: application/json" -X POST http://kibana:5601/api/fleet/agent_policies \
+              -d "{\"name\":\"Fleet Server\",\"description\":\"Fleet Server policy\",\"namespace\":\"default\",\"is_default_fleet_server\":true,\"has_fleet_server\":true}"
+          echo ""
+        else
+          echo "Default Fleet Server policy already present"
+        fi
+
+        # --- Fleet Server hosts -> https://${ELASTIC_IP}:8220 ---
+        echo "Setting Fleet Server hosts to https://${ELASTIC_IP}:8220"
+        curl -s -u "elastic:${ELASTIC_PASSWORD}" -H "kbn-xsrf: 1" -H "Content-Type: application/json" -X POST http://kibana:5601/api/fleet/fleet_server_hosts \
+          -d "{\"name\":\"local-fleet\",\"host_urls\":[\"https://${ELASTIC_IP}:8220\"],\"is_default\":true}" 
+        echo ""
+
+        # --- Default output -> get id (robust, no gawk extensions) ---
+        echo "Getting current default output ID"
+        OUT_JSON=$(curl -s -u "elastic:${ELASTIC_PASSWORD}" http://kibana:5601/api/fleet/outputs)
+        OUT_ID=$$(printf '%s' "$$OUT_JSON" | awk -v RS='{' '/"is_default":true/ { if (match($$0, /"id":"[^"]+"/)) { print substr($$0, RSTART+6, RLENGTH-7); exit } }')
+        echo $$OUT_ID
+
+        # --- Compute CA SHA-256 fingerprint via keytool ---
+        echo "Getting certificate fingerprint"
+        FP=$$(/usr/share/elasticsearch/jdk/bin/keytool -printcert -file config/certs/ca/ca.crt -v | awk '/SHA-?256/{line=$$0; sub(/.*SHA-?256[: ]*/,"",line); gsub(/:/,"",line); print tolower(line); exit}')
+        echo $$FP
+
+        # --- Update default output (kept your host setting as-is) ---
+        echo "Setting default output to https://${ELASTIC_IP}:9200"
+        data="{\"name\": \"Default Elasticsearch\", \"type\": \"elasticsearch\", \"is_default\": true,\"is_default_monitoring\": true, \"hosts\": [\"https://${ELASTIC_IP}:9200\"], \"ca_trusted_fingerprint\": \"$${FP}\" }"
+        echo "SENDING DATA: $$data"
+        curl -s -u "elastic:${ELASTIC_PASSWORD}" -H "kbn-xsrf: 1" -H "Content-Type: application/json" \
+          -X PUT "http://kibana:5601/api/fleet/outputs/fleet-default-output" \
+          --data-binary @- <<JSON
+        {
+          "name": "Default Elasticsearch",
+          "type": "elasticsearch",
+          "is_default": true,
+          "is_default_monitoring": true,
+          "hosts": ["https://${ELASTIC_IP}:9200"],
+          "ca_trusted_fingerprint": "$${FP}"
+        }
+        JSON
+        echo ""
+        
+        echo "All done!"
+
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  es01:
+    depends_on:
+      setup:
+        condition: service_healthy
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    labels:
+      co.elastic.logs/module: elasticsearch
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - esdata01:/usr/share/elasticsearch/data
+    ports:
+      - ${ES_PORT}:9200
+    environment:
+      - node.name=es01
+      - cluster.name=${CLUSTER_NAME}
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/es01/es01.key
+      - xpack.security.http.ssl.certificate=certs/es01/es01.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/es01/es01.key
+      - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=${LICENSE}
+    mem_limit: ${ES_MEM_LIMIT}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  kibana:
+    depends_on:
+      es01:
+        condition: service_healthy
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    labels:
+      co.elastic.logs/module: kibana
+    volumes:
+      - certs:/usr/share/kibana/config/certs
+      - kibanadata:/usr/share/kibana/data
+    ports:
+      - ${KIBANA_PORT}:5601
+    environment:
+      - SERVERNAME=kibana
+      - ELASTICSEARCH_HOSTS=https://es01:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      - XPACK_SECURITY_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_FLEET_AGENTS_TLS_CERT=config/certs/ca/ca.crt
+    mem_limit: ${KB_MEM_LIMIT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  fleet-server:
+    depends_on:
+      kibana:
+        condition: service_healthy
+    image: docker.elastic.co/elastic-agent/elastic-agent:${STACK_VERSION}
+    user: root
+    volumes:
+      - certs:/usr/share/elastic-agent/certs
+    ports:
+      - 8220:8220 
+    environment:
+      - KIBANA_HOST=http://kibana:5601
+      - KIBANA_USERNAME=elastic
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+      - ELASTICSEARCH_USERNAME=elastic
+      - ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}
+      - FLEET_SERVER_ENABLE=true
+      - FLEET_SERVER_HOST=0.0.0.0
+      - FLEET_SERVER_PORT=8220
+      - FLEET_SERVER_INSECURE_HTTP=false
+      - FLEET_SERVER_ELASTICSEARCH_HOST=https://es01:9200
+      - FLEET_SERVER_ELASTICSEARCH_CA=/usr/share/elastic-agent/certs/ca/ca.crt
+      - FLEET_SERVER_CERT=/usr/share/elastic-agent/certs/fleet-server/fleet-server.crt
+      - FLEET_SERVER_CERT_KEY=/usr/share/elastic-agent/certs/fleet-server/fleet-server.key
+      - FLEET_URL=https://fleet-server:8220
+      - FLEET_CA=/usr/share/elastic-agent/certs/ca/ca.crt
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -k --cert certs/fleet-server/fleet-server.crt --key certs/fleet-server/fleet-server.key https://localhost:8220/api/status | grep -q 'ok'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+      start_period: 30s
+
+  metricbeat01:
+    depends_on:
+      es01:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
+    image: docker.elastic.co/beats/metricbeat:${STACK_VERSION}
+    user: root
+    volumes:
+      - certs:/usr/share/metricbeat/certs
+      - metricbeatdata01:/usr/share/metricbeat/data
+      - "./metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "/sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro"
+      - "/proc:/hostfs/proc:ro"
+      - "/:/hostfs:ro"
+    environment:
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ELASTIC_HOSTS=https://es01:9200
+      - KIBANA_HOSTS=http://kibana:5601
+      - LOGSTASH_HOSTS=https://logstash01:9600
+
+  filebeat01:
+    depends_on:
+      es01:
+        condition: service_healthy
+    image: docker.elastic.co/beats/filebeat:${STACK_VERSION}
+    user: root
+    volumes:
+      - certs:/usr/share/filebeat/certs
+      - filebeatdata01:/usr/share/filebeat/data
+      - "./filebeat_ingest_data/:/usr/share/filebeat/ingest_data/"
+      - "./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro"
+      - "/var/lib/docker/containers:/var/lib/docker/containers:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    environment:
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ELASTIC_HOSTS=https://es01:9200
+      - KIBANA_HOSTS=http://kibana:5601
+      - LOGSTASH_HOSTS=https://logstash01:9600
+
+  logstash01:
+    depends_on:
+      es01:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
+    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
+    labels:
+      co.elastic.logs/module: logstash
+    user: "1000:0"
+    volumes:
+      - certs:/usr/share/logstash/certs
+      - logstashdata01:/usr/share/logstash/data
+      - "./logstash_ingest_data/:/usr/share/logstash/ingest_data/"
+      - "./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro"
+    ports:
+      - "5044:5044"     # Beats (TCP)
+      - "5141:5141/udp" # Syslog (UDP)
+    environment:
+      - xpack.monitoring.enabled=false
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ELASTIC_HOSTS=https://es01:9200
+
