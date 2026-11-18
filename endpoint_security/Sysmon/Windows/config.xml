@@ -1,0 +1,1440 @@
+<!--
+  Sysmon baseline config | Incident-response focused, low noise, MITRE ATT&CK v20.1 tagged
+  Version:	1.0 | Date: 2026-11-18
+  Target:	Sysmon 15.x (Sysinternals) and the built-in Windows 11 / Server 2025 Sysmon feature | schemaversion 4.90
+
+  Based on:	sysmon-config v74 by SwiftOnSecurity (https://github.com/SwiftOnSecurity/sysmon-config), CC BY 4.0
+		Modified: rules reviewed and retagged, holes closed, events 25-29 added.
+  Ideas from:	sysmon-modular by Olaf Hartong (https://github.com/olafhartong/sysmon-modular), MIT license
+
+  RuleName format:	technique_id=Txxxx,technique_name=<name>   (parse in ELK with a kv filter, field_split ",")
+
+  EVENT OVERVIEW
+	 1 ProcessCreate		ON  all, noise excluded, untagged (MITRE mapping in ELK)
+	 2 FileCreateTime		ON  timestomping of executables/scripts and from staging locations
+	 3 NetworkConnect		ON  LOLBins, tunnels, RAT tools, suspicious paths and ports
+	 5 ProcessTerminate		ON  suspicious paths, security/logging tools ending
+	 6 DriverLoad		OFF (enable later: log all except "Microsoft Windows" signed)
+	 7 ImageLoad			OFF (use PowerShell Script Block Logging, event 4104, instead)
+	 8 CreateRemoteThread	ON  all, Windows core excluded
+	 9 RawAccessRead		OFF (consider a DC variant)
+	10 ProcessAccess		ON  LSASS, password managers, browser injection
+	11 FileCreate		ON  scripts, containers, Office, persistence locations (PE files -> event 29)
+	12-14 Registry		ON  persistence, defense impairment, credential settings
+	15 FileCreateStreamHash	ON  Mark-of-the-Web download source (HostUrl), hidden ADS payloads
+	17-18 PipeEvent		ON  known tool pipes, PowerShell hosted outside powershell.exe
+	19-21 WmiEvent		ON  all permanent WMI subscriptions
+	22 DnsQuery			ON  all, noise excluded, untagged
+	23 FileDelete (archive)	OFF
+	24 ClipboardChange		OFF (privacy / GDPR)
+	25 ProcessTampering		ON  process hollowing / herpaderping
+	26 FileDeleteDetected	ON  narrow: backups, event logs, tool cleanup
+	27 FileBlockExecutable	BLOCK Office apps and script hosts writing executables
+	28 FileBlockShredding	BLOCK secure-delete / shredding
+	29 FileExecutableDetected	ON  every new PE file with hash, updaters excluded
+
+  TECHNICAL:
+  - Sysmon conditions are case-insensitive. "image" matches the full path or only the file name.
+  - Exclude always wins over include. Within one RuleGroup with groupRelation "or", the first matching rule names the event.
+  - <Rule groupRelation="and"> combines several conditions into one rule.
+-->
+
+<Sysmon schemaversion="4.90">
+	<!--SYSMON META CONFIG-->
+	<HashAlgorithms>SHA256,IMPHASH</HashAlgorithms> <!--SHA256 for threat intel / VirusTotal, IMPHASH for malware family clustering-->
+	<CheckRevocation>True</CheckRevocation> <!--Check signature revocation (drivers/images)-->
+	<DnsLookup>False</DnsLookup> <!--No reverse lookups for NetworkConnect: faster, less DNS noise, PTR records are attacker-controlled anyway-->
+
+	<EventFiltering>
+
+	<!--SYSMON EVENT ID 1 : PROCESS CREATION [ProcessCreate]-->
+		<!--COMMENT:	All processes are logged except the noise below. Untagged on purpose: MITRE mapping is done in ELK (Sigma / detection rules).-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessCreate onmatch="exclude">
+			<CommandLine condition="begin with"> "C:\Windows\system32\wermgr.exe" "-queuereporting_svc" </CommandLine> <!--Windows:Windows error reporting/telemetry-->
+			<CommandLine condition="begin with">C:\Windows\system32\wbem\wmiprvse.exe -Embedding</CommandLine> <!--Windows: WMI provider host-->
+			<CommandLine condition="begin with">C:\Windows\system32\wbem\wmiprvse.exe -secured -Embedding</CommandLine> <!--Windows: WMI provider host-->
+			<CommandLine condition="is">C:\Windows\system32\wermgr.exe -upload</CommandLine> <!--Windows:Windows error reporting/telemetry-->
+			<CommandLine condition="is">C:\Windows\system32\SearchIndexer.exe /Embedding</CommandLine> <!--Windows: Search Indexer-->
+			<CommandLine condition="is">C:\windows\system32\wermgr.exe -queuereporting</CommandLine> <!--Windows:Windows error reporting/telemetry-->
+			<CommandLine condition="is">\??\C:\Windows\system32\autochk.exe *</CommandLine> <!--Microsoft:Bootup: Auto Check Utility-->
+			<CommandLine condition="is">\SystemRoot\System32\smss.exe</CommandLine> <!--Microsoft:Bootup: Windows Session Manager-->
+			<CommandLine condition="is">C:\Windows\System32\RuntimeBroker.exe -Embedding</CommandLine> <!--Windows:Apps permissions [ https://fossbytes.com/runtime-broker-process-windows-10/ ] -->
+			<Image condition="is">C:\Program Files (x86)\Common Files\microsoft shared\ink\TabTip32.exe</Image> <!--Windows: Touch Keyboard and Handwriting Panel Helper-->
+			<Image condition="is">C:\Windows\System32\TokenBrokerCookies.exe</Image> <!--Windows: SSO sign-in assistant for MicrosoftOnline.com-->
+			<Image condition="is">C:\Windows\System32\plasrv.exe</Image> <!--Windows: Performance Logs and Alerts DCOM Server-->
+			<Image condition="is">C:\Windows\System32\wifitask.exe</Image> <!--Windows: Wireless Background Task-->
+			<Image condition="is">C:\Windows\system32\CompatTelRunner.exe</Image> <!--Windows: Customer Experience Improvement-->
+			<Image condition="is">C:\Windows\system32\PrintIsolationHost.exe</Image> <!--Windows: Printing-->
+			<Image condition="is">C:\Windows\system32\SppExtComObj.Exe</Image> <!--Windows: KMS activation-->
+			<Image condition="is">C:\Windows\system32\audiodg.exe</Image> <!--Windows: Launched constantly-->
+			<Image condition="is">C:\Windows\system32\conhost.exe</Image> <!--Windows: Command line interface host process-->
+			<Image condition="is">C:\Windows\system32\mobsync.exe</Image> <!--Windows: Network file syncing-->
+			<Image condition="is">C:\Windows\system32\musNotification.exe</Image> <!--Windows: Update pop-ups-->
+			<Image condition="is">C:\Windows\system32\musNotificationUx.exe</Image> <!--Windows: Update pop-ups-->
+			<Image condition="is">C:\Windows\system32\powercfg.exe</Image> <!--Microsoft:Power configuration management-->
+			<Image condition="is">C:\Windows\system32\sndVol.exe</Image> <!--Windows: Volume control-->
+			<Image condition="is">C:\Windows\system32\sppsvc.exe</Image> <!--Windows: Software Protection Service-->
+			<Image condition="is">C:\Windows\system32\wbem\WmiApSrv.exe</Image> <!--Windows: WMI performance adapter host process-->
+			<IntegrityLevel condition="is">AppContainer</IntegrityLevel> <!--Windows: Don't care about sandboxed processes right now. Will need to revisit this decision.-->
+			<ParentCommandLine condition="begin with">%%SystemRoot%%\system32\csrss.exe ObjectDirectory=\Windows</ParentCommandLine> <!--Windows:CommandShell: Triggered when programs use the command shell, but doesn't provide attribution for what caused it-->
+			<ParentCommandLine condition="is">C:\windows\system32\wermgr.exe -queuereporting</ParentCommandLine> <!--Windows:Windows error reporting/telemetry-->
+			<CommandLine condition="is">C:\WINDOWS\system32\devicecensus.exe UserCxt</CommandLine>
+			<CommandLine condition="is">C:\Windows\System32\usocoreworker.exe -Embedding</CommandLine>
+			<ParentImage condition="is">C:\Windows\system32\SearchIndexer.exe</ParentImage> <!--Windows:Search: Launches many uninteresting sub-processes-->
+			<!--SECTION: Windows:svchost-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k appmodel -s StateRepository</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k appmodel -p -s camsvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k appmodel</CommandLine> <!--Windows 10-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k appmodel -p -s tiledatamodelsvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k camera -s FrameServer</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k dcomlaunch -s LSM</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k dcomlaunch -s PlugPlay</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k defragsvc</CommandLine> <!--Windows defragmentation-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k devicesflow -s DevicesFlowUserSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k imgsvc</CommandLine> <!--Microsoft:The Windows Image Acquisition Service-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localService -s EventSystem</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localService -s bthserv</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k LocalService -p -s BthAvctpSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localService -s nsi</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localService -s w32Time</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceAndNoImpersonation</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceAndNoImpersonation -p</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNetworkRestricted -s Dhcp</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNetworkRestricted -s EventLog</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNetworkRestricted -s TimeBrokerSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNetworkRestricted -s WFDSConMgrSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k LocalServiceNetworkRestricted -s BTAGService</CommandLine>
+			<CommandLine condition="is">C:\Windows\System32\svchost.exe -k LocalSystemNetworkRestricted -p -s NcbService</CommandLine> <!--Win10:1903:Network Connection Broker-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNetworkRestricted</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceAndNoImpersonation -s SensrSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceAndNoImpersonation -p -s SSDPSRV</CommandLine> <!--Windows:SSDP [ https://en.wikipedia.org/wiki/Simple_Service_Discovery_Protocol ] -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNoNetwork</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -p -s WPDBusEnum</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -p -s fhsvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s DeviceAssociationService</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s NcbService</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s SensorService</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s TabletInputService</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s UmRdpService</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s WPDBusEnum</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -p -s NgcSvc</CommandLine> <!--Microsoft:Passport-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceNetworkRestricted -p -s NgcCtnrSvc</CommandLine> <!--Microsoft:Passport Container-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localServiceAndNoImpersonation -s SCardSvr</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -p -s wuauserv</CommandLine>
+			<CommandLine condition="is">C:\Windows\System32\svchost.exe -k netsvcs -p -s SessionEnv</CommandLine> <!--Windows:Remote desktop configuration-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted -s WdiSystemHost</CommandLine> <!--Windows: Diagnostic System Host [ http://www.blackviper.com/windows-services/diagnostic-system-host/ ] -->
+			<CommandLine condition="is">C:\Windows\System32\svchost.exe -k localSystemNetworkRestricted -p -s WdiSystemHost</CommandLine> <!--Windows: Diagnostic System Host [ http://www.blackviper.com/windows-services/diagnostic-system-host/ ] -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k localSystemNetworkRestricted</CommandLine> <!--Windows-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -p -s wlidsvc</CommandLine> <!--Windows: Windows Live Sign-In Assistant [ https://www.howtogeek.com/howto/30348/what-are-wlidsvc.exe-and-wlidsvcm.exe-and-why-are-they-running/ ] -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -p -s ncaSvc</CommandLine> <!--Windows: Network Connectivity Assistant [ http://www.blackviper.com/windows-services/network-connectivity-assistant/ ] -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s BDESVC</CommandLine> <!--Windows:Network: BitLocker Drive Encryption-->
+			<CommandLine condition="is">C:\Windows\System32\svchost.exe -k netsvcs -p -s BDESVC</CommandLine> <!--Microsoft:Win10:1903:Network: BitLocker Drive Encryption-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -p -s BITS</CommandLine> <!--Windows:Network: Background Intelligent File Transfer (BITS) -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s BITS</CommandLine> <!--Windows:Network: Background Intelligent File Transfer (BITS) -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s CertPropSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s DsmSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -p -s Appinfo</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s Gpsvc</CommandLine> <!--Windows:Network: Group Policy -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s ProfSvc</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s SENS</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s SessionEnv</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s Themes</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs -s Winmgmt</CommandLine> <!--Windows: Windows Management Instrumentation (WMI) -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k netsvcs</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService -p -s DoSvc</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService -s Dnscache</CommandLine> <!--Windows:Network: DNS caching, other uses -->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService -s LanmanWorkstation</CommandLine> <!--Windows:Network: "Workstation" service, used for SMB file-sharing connections and RDP-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService -s NlaSvc</CommandLine> <!--Windows:Network: Network Location Awareness-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService -s TermService</CommandLine> <!--Windows:Network: Terminal Services (RDP)-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkService -p</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k networkServiceNetworkRestricted</CommandLine> <!--Windows: Network services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k rPCSS</CommandLine> <!--Windows Services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k secsvcs</CommandLine>
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k swprv</CommandLine> <!--Microsoft:Software Shadow Copy Provider-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k unistackSvcGroup</CommandLine> <!--Windows 10-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k utcsvc</CommandLine> <!--Windows Services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k wbioSvcGroup</CommandLine> <!--Windows Services-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k werSvcGroup</CommandLine> <!--Windows: ErrorReporting-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k wusvcs -p -s WaaSMedicSvc</CommandLine> <!--Windows: Update Medic Service [ https://www.thewindowsclub.com/windows-update-medic-service ] -->
+			<CommandLine condition="is">C:\Windows\System32\svchost.exe -k wsappx -p -s ClipSVC</CommandLine> <!--Windows:Apps: Client License Service-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k wsappx -p -s AppXSvc</CommandLine> <!--Windows:Apps: AppX Deployment Service-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k wsappx -s ClipSVC</CommandLine> <!--Windows:Apps: Client License Service-->
+			<CommandLine condition="is">C:\Windows\system32\svchost.exe -k wsappx</CommandLine> <!--Windows:Apps [ https://www.howtogeek.com/320261/what-is-wsappx-and-why-is-it-running-on-my-pc/ ] -->
+			<CommandLine condition="is">C:\Windows\system32\deviceenroller.exe /c /AutoEnrollMDM</CommandLine> <!--Windows: AzureAD device enrollment agent-->
+			<!--SECTION: Microsoft:Edge-->
+			<CommandLine condition="begin with">"C:\Program Files (x86)\Microsoft\Edge Dev\Application\msedge.exe" --type=</CommandLine>
+			<!--SECTION: Microsoft:dotNet-->
+			<CommandLine condition="begin with">C:\Windows\Microsoft.NET\Framework\v4.0.30319\ngen.exe</CommandLine> <!--Microsoft:DotNet-->
+			<CommandLine condition="begin with">C:\WINDOWS\Microsoft.NET\Framework64\v4.0.30319\Ngen.exe</CommandLine> <!--Microsoft:DotNet-->
+			<CommandLine condition="begin with">C:\Windows\Microsoft.NET\Framework\v4.0.30319\ngentask.exe</CommandLine> <!--Microsoft:DotNet-->
+			<CommandLine condition="begin with">C:\WINDOWS\Microsoft.NET\Framework64\v4.0.30319\ngentask.exe</CommandLine> <!--Microsoft:DotNet-->
+			<Image condition="is">C:\Windows\Microsoft.NET\Framework64\v4.0.30319\mscorsvw.exe</Image> <!--Microsoft:DotNet-->
+			<Image condition="is">C:\Windows\Microsoft.NET\Framework\v4.0.30319\mscorsvw.exe</Image> <!--Microsoft:DotNet-->
+			<Image condition="is">C:\Windows\Microsoft.Net\Framework64\v3.0\WPF\PresentationFontCache.exe</Image> <!--Windows: Font cache service-->
+			<ParentCommandLine condition="begin with">C:\Windows\Microsoft.NET\Framework64\v4.0.30319\ngentask.exe</ParentCommandLine>
+			<ParentImage condition="is">C:\Windows\Microsoft.NET\Framework64\v4.0.30319\mscorsvw.exe</ParentImage> <!--Microsoft:DotNet-->
+			<ParentImage condition="is">C:\Windows\Microsoft.NET\Framework64\v4.0.30319\ngentask.exe</ParentImage> <!--Microsoft:DotNet-->
+			<ParentImage condition="is">C:\Windows\Microsoft.NET\Framework\v4.0.30319\mscorsvw.exe</ParentImage> <!--Microsoft:DotNet-->
+			<ParentImage condition="is">C:\Windows\Microsoft.NET\Framework\v4.0.30319\ngentask.exe</ParentImage> <!--Microsoft:DotNet: Spawns thousands of ngen.exe processes-->
+			<!--SECTION: Microsoft:Office-->
+			<Image condition="is">C:\Program Files\Microsoft Office\Office16\MSOSYNC.EXE</Image> <!--Microsoft:Office: Background process for SharePoint/Office365 connectivity-->
+			<Image condition="is">C:\Program Files (x86)\Microsoft Office\Office16\MSOSYNC.EXE</Image> <!--Microsoft:Office: Background process for SharePoint/Office365 connectivity-->
+			<Image condition="is">C:\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPSVC.EXE</Image> <!--Microsoft:Office: Licensing service-->
+			<Image condition="is">C:\Program Files\Microsoft Office\Office16\msoia.exe</Image> <!--Microsoft:Office: Telemetry collector-->
+			<Image condition="is">C:\Program Files (x86)\Microsoft Office\root\Office16\officebackgroundtaskhandler.exe</Image>
+			<!--SECTION: Microsoft:Office:Click2Run-->
+			<Image condition="is">C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe</Image> <!--Microsoft:Office: Background process-->
+			<ParentImage condition="is">C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe</ParentImage> <!--Microsoft:Office: Background process-->
+			<ParentImage condition="is">C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe</ParentImage> <!--Microsoft:Office: Background process-->
+			<!--SECTION: Windows: Media player-->
+			<Image condition="is">C:\Program Files\Windows Media Player\wmpnscfg.exe</Image> <!--Windows: Windows Media Player Network Sharing Service Configuration Application-->
+			<!--SECTION: Google-->
+			<CommandLine condition="begin with">"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" --type=</CommandLine> <!--Google:Chrome: massive command-line arguments-->
+			<CommandLine condition="begin with">"C:\Program Files\Google\Chrome\Application\chrome.exe" --type=</CommandLine> <!--Google:Chrome: massive command-line arguments-->
+			<!--SECTION: Browser child processes (machine-wide installs only) - renderer/GPU/utility, main process stays logged-->
+			<CommandLine condition="begin with">"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --type=</CommandLine>
+			<CommandLine condition="begin with">"C:\Program Files\Microsoft\Edge\Application\msedge.exe" --type=</CommandLine>
+			<CommandLine condition="contains all">C:\Program Files (x86)\Microsoft\EdgeWebView\Application\;msedgewebview2.exe" --type=</CommandLine> <!--WebView2: new Teams, new Outlook, Widgets-->
+			<CommandLine condition="begin with">"C:\Program Files\Mozilla Firefox\firefox.exe" -contentproc</CommandLine>
+			<CommandLine condition="begin with">"C:\Program Files\Firefox Developer Edition\firefox.exe" -contentproc</CommandLine>
+			<CommandLine condition="begin with">"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --type=</CommandLine>
+		</ProcessCreate>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 2 : FILE CREATION TIME RETROACTIVELY CHANGED [FileCreateTime]-->
+		<!--COMMENT:	Timestomping (T1070.006) from staging locations, or of any executable/script content.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileCreateTime onmatch="include">
+			<!--Who: timestomping from user-writable / staging locations-->
+			<Image name="technique_id=T1070.006,technique_name=Timestomp" condition="begin with">C:\Users\</Image>
+			<Image name="technique_id=T1070.006,technique_name=Timestomp" condition="begin with">C:\ProgramData\</Image>
+			<Image name="technique_id=T1070.006,technique_name=Timestomp" condition="begin with">C:\Windows\Temp\</Image>
+			<Image name="technique_id=T1070.006,technique_name=Timestomp" condition="begin with">\Device\HarddiskVolumeShadowCopy</Image>
+			<!--What: backdated executable or script content anywhere-->
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.exe</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.dll</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.sys</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.ocx</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.cpl</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.scr</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.com</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.pif</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.xll</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.wll</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.msi</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.msp</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.msc</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.jar</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.appref-ms</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.ps1</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.psm1</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.psd1</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.bat</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.cmd</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.vbs</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.vbe</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.js</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.jse</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.wsf</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.wsh</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.hta</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.sct</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.lnk</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.chm</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.inf</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.reg</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.scf</TargetFilename>
+			<TargetFilename name="technique_id=T1070.006,technique_name=Timestomp" condition="end with">.settingcontent-ms</TargetFilename>
+		</FileCreateTime>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileCreateTime onmatch="exclude">
+			<!--SECTION: Windows servicing / installers (exact paths)-->
+			<Image condition="is">C:\Windows\System32\msiexec.exe</Image>
+			<Image condition="is">C:\Windows\SysWOW64\msiexec.exe</Image>
+			<Image condition="is">C:\Windows\System32\backgroundTaskHost.exe</Image>
+			<Image condition="begin with">C:\Windows\SoftwareDistribution\</Image>
+			<!--SECTION: Windows servicing / Windows Update-->
+			<Image condition="is">C:\Windows\servicing\TrustedInstaller.exe</Image>
+			<Image condition="begin with">C:\Windows\WinSxS\</Image> <!--TiWorker.exe-->
+			<Image condition="is">C:\Windows\System32\MpSigStub.exe</Image> <!--Defender update stub-->
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</Image>
+			<!--SECTION: Office Click-to-Run-->
+			<Image condition="is">C:\Program Files\Common Files\microsoft shared\ClickToRun\OfficeClickToRun.exe</Image>
+			<Image condition="is">C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe</Image>
+			<!--SECTION: Browser updaters (machine-wide)-->
+			<Image condition="begin with">C:\Program Files (x86)\Microsoft\EdgeUpdate\</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Microsoft\Edge\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files\Microsoft\Edge\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Microsoft\EdgeWebView\Application\;\Installer\setup.exe</Image>
+			<Image condition="begin with">C:\Program Files (x86)\Google\GoogleUpdater\</Image>
+			<Image condition="begin with">C:\Program Files (x86)\Google\Update\</Image>
+			<Image condition="contains all">C:\Program Files\Google\Chrome\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Google\Chrome\Application\;\Installer\setup.exe</Image>
+			<Image condition="begin with">C:\Program Files (x86)\BraveSoftware\Update\</Image>
+			<Image condition="contains all">C:\Program Files\BraveSoftware\Brave-Browser\Application\;\Installer\setup.exe</Image>
+			<Image condition="is">C:\Program Files\Mozilla Firefox\updater.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\updater.exe</Image>
+			<Image condition="is">C:\Program Files (x86)\Mozilla Maintenance Service\maintenanceservice.exe</Image>
+			<!--SECTION: OneDrive (per-user install, exact paths)-->
+			<Image condition="is">C:\Program Files\Microsoft OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDriveStandaloneUpdater.exe</Image>
+			<Image condition="contains all">\AppData\Local\Microsoft\OneDrive\;\OneDriveSetup.exe</Image>
+			<!--SECTION: Noise-->
+			<TargetFilename condition="contains">\NVIDIA\NvBackend\ApplicationOntology\</TargetFilename> <!--NVIDIA GeForce Experience-->
+		</FileCreateTime>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 3 : NETWORK CONNECTION INITIATED [NetworkConnect]-->
+		<!--COMMENT:	Targeted: suspicious source paths, LOLBins, tunnels, remote access tools, suspicious ports. Office apps removed (M365 noise).-->
+	<RuleGroup name="" groupRelation="or">
+		<NetworkConnect onmatch="include">
+			<!--Suspicious source locations-->
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Users\</Image> <!--User profiles: AppData, Downloads, Public-->
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\ProgramData\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\Temp\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\$Recycle.Bin\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\PerfLogs\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Intel\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\Fonts\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\System32\config\</Image>
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\Tasks\</Image> <!--World-writable-->
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\Tracing\</Image> <!--World-writable-->
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\System32\Tasks\</Image> <!--World-writable-->
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">C:\Windows\System32\spool\drivers\color\</Image> <!--World-writable-->
+			<Image name="technique_id=T1071,technique_name=Application Layer Protocol" condition="begin with">\</Image> <!--UNC paths, devices, shadow copies-->
+			<!--LOLBins, attacker tools, tunnels, exfiltration and remote access tools-->
+			<Image name="technique_id=T1053.002,technique_name=At" condition="image">at.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">certutil.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">certreq.exe</Image>
+			<Image name="technique_id=T1059.003,technique_name=Windows Command Shell" condition="image">cmd.exe</Image>
+			<Image name="technique_id=T1218.003,technique_name=CMSTP" condition="image">cmstp.exe</Image>
+			<Image name="technique_id=T1059.005,technique_name=Visual Basic" condition="image">cscript.exe</Image>
+			<Image name="technique_id=T1059.005,technique_name=Visual Basic" condition="image">wscript.exe</Image>
+			<Image name="technique_id=T1082,technique_name=System Information Discovery" condition="image">driverquery.exe</Image>
+			<Image name="technique_id=T1087,technique_name=Account Discovery" condition="image">dsquery.exe</Image>
+			<Image name="technique_id=T1218.001,technique_name=Compiled HTML File" condition="image">hh.exe</Image>
+			<Image name="technique_id=T1218,technique_name=System Binary Proxy Execution" condition="image">infDefaultInstall.exe</Image>
+			<Image name="technique_id=T1218.014,technique_name=MMC" condition="image">mmc.exe</Image>
+			<Image name="technique_id=T1127.001,technique_name=MSBuild" condition="image">msbuild.exe</Image>
+			<Image name="technique_id=T1218.005,technique_name=Mshta" condition="image">mshta.exe</Image>
+			<Image name="technique_id=T1218.007,technique_name=Msiexec" condition="image">msiexec.exe</Image>
+			<Image name="technique_id=T1018,technique_name=Remote System Discovery" condition="image">nbtstat.exe</Image>
+			<Image name="technique_id=T1087,technique_name=Account Discovery" condition="image">net.exe</Image>
+			<Image name="technique_id=T1087,technique_name=Account Discovery" condition="image">net1.exe</Image>
+			<Image name="technique_id=T1055,technique_name=Process Injection" condition="image">notepad.exe</Image>
+			<Image name="technique_id=T1016,technique_name=System Network Configuration Discovery" condition="image">nslookup.exe</Image>
+			<Image name="technique_id=T1059.001,technique_name=PowerShell" condition="image">powershell.exe</Image>
+			<Image name="technique_id=T1059.001,technique_name=PowerShell" condition="image">powershell_ise.exe</Image>
+			<Image name="technique_id=T1059.001,technique_name=PowerShell" condition="image">pwsh.exe</Image>
+			<Image name="technique_id=T1057,technique_name=Process Discovery" condition="image">qprocess.exe</Image>
+			<Image name="technique_id=T1033,technique_name=System Owner/User Discovery" condition="image">qwinsta.exe</Image>
+			<Image name="technique_id=T1033,technique_name=System Owner/User Discovery" condition="image">rwinsta.exe</Image>
+			<Image name="technique_id=T1112,technique_name=Modify Registry" condition="image">reg.exe</Image>
+			<Image name="technique_id=T1218.009,technique_name=Regsvcs/Regasm" condition="image">regsvcs.exe</Image>
+			<Image name="technique_id=T1218.009,technique_name=Regsvcs/Regasm" condition="image">regasm.exe</Image>
+			<Image name="technique_id=T1218.010,technique_name=Regsvr32" condition="image">regsvr32.exe</Image>
+			<Image name="technique_id=T1218.011,technique_name=Rundll32" condition="image">rundll32.exe</Image>
+			<Image name="technique_id=T1543.003,technique_name=Windows Service" condition="image">sc.exe</Image>
+			<Image name="technique_id=T1053.005,technique_name=Scheduled Task" condition="image">schtasks.exe</Image>
+			<Image name="technique_id=T1489,technique_name=Service Stop" condition="image">taskkill.exe</Image>
+			<Image name="technique_id=T1057,technique_name=Process Discovery" condition="image">tasklist.exe</Image>
+			<Image name="technique_id=T1047,technique_name=Windows Management Instrumentation" condition="image">wmic.exe</Image>
+			<Image name="technique_id=T1197,technique_name=BITS Jobs" condition="image">bitsadmin.exe</Image>
+			<Image name="technique_id=T1218.004,technique_name=InstallUtil" condition="image">installutil.exe</Image>
+			<Image name="technique_id=T1218.008,technique_name=Odbcconf" condition="image">odbcconf.exe</Image>
+			<Image name="technique_id=T1218,technique_name=System Binary Proxy Execution" condition="image">presentationhost.exe</Image>
+			<Image name="technique_id=T1218,technique_name=System Binary Proxy Execution" condition="image">msdt.exe</Image>
+			<Image name="technique_id=T1218,technique_name=System Binary Proxy Execution" condition="image">wuauclt.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">curl.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">finger.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">ftp.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">tftp.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">desktopimgdownldr.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">AppInstaller.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">MpCmdRun.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">esentutl.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">expand.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">extrac32.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">findstr.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">GfxDownloadWrapper.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">ieexec.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">makecab.exe</Image>
+			<Image name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="image">replace.exe</Image>
+			<Image name="technique_id=T1218,technique_name=System Binary Proxy Execution" condition="image">squirrel.exe</Image>
+			<Image name="technique_id=T1021.004,technique_name=SSH" condition="image">ssh.exe</Image>
+			<Image name="technique_id=T1021.004,technique_name=SSH" condition="image">scp.exe</Image>
+			<Image name="technique_id=T1021.004,technique_name=SSH" condition="image">sftp.exe</Image>
+			<Image name="technique_id=T1095,technique_name=Non-Application Layer Protocol" condition="image">nc.exe</Image>
+			<Image name="technique_id=T1095,technique_name=Non-Application Layer Protocol" condition="image">ncat.exe</Image>
+			<Image name="technique_id=T1046,technique_name=Network Service Discovery" condition="image">nmap.exe</Image>
+			<Image name="technique_id=T1082,technique_name=System Information Discovery" condition="image">psinfo.exe</Image>
+			<Image name="technique_id=T1569.002,technique_name=Service Execution" condition="image">psexec.exe</Image>
+			<Image name="technique_id=T1569.002,technique_name=Service Execution" condition="image">psexec64.exe</Image>
+			<Image name="technique_id=T1569.002,technique_name=Service Execution" condition="image">psexesvc.exe</Image>
+			<Image name="technique_id=T1569.002,technique_name=Service Execution" condition="image">winexesvc.exe</Image>
+			<Image name="technique_id=T1090.003,technique_name=Multi-hop Proxy" condition="image">tor.exe</Image>
+			<Image name="technique_id=T1021.005,technique_name=VNC" condition="image">vnc.exe</Image>
+			<Image name="technique_id=T1021.005,technique_name=VNC" condition="image">vncservice.exe</Image>
+			<Image name="technique_id=T1021.005,technique_name=VNC" condition="image">vncviewer.exe</Image>
+			<Image name="technique_id=T1572,technique_name=Protocol Tunneling" condition="image">ngrok.exe</Image>
+			<Image name="technique_id=T1572,technique_name=Protocol Tunneling" condition="image">cloudflared.exe</Image>
+			<Image name="technique_id=T1572,technique_name=Protocol Tunneling" condition="image">plink.exe</Image>
+			<Image name="technique_id=T1567.002,technique_name=Exfiltration to Cloud Storage" condition="image">rclone.exe</Image>
+			<Image name="technique_id=T1567.002,technique_name=Exfiltration to Cloud Storage" condition="image">winscp.exe</Image>
+			<Image name="technique_id=T1567.002,technique_name=Exfiltration to Cloud Storage" condition="image">MEGAsync.exe</Image>
+			<Image name="technique_id=T1219,technique_name=Remote Access Tools" condition="image">AnyDesk.exe</Image>
+			<Image name="technique_id=T1219,technique_name=Remote Access Tools" condition="image">TeamViewer.exe</Image>
+			<Image name="technique_id=T1219,technique_name=Remote Access Tools" condition="image">ScreenConnect.ClientService.exe</Image>
+			<Image name="technique_id=T1219,technique_name=Remote Access Tools" condition="image">rustdesk.exe</Image>
+			<Image name="technique_id=T1219,technique_name=Remote Access Tools" condition="image">SRService.exe</Image>
+			<!--Suspicious ports-->
+			<DestinationPort name="technique_id=T1021.004,technique_name=SSH" condition="is">22</DestinationPort> <!--SSH-->
+			<DestinationPort name="technique_id=T1021,technique_name=Remote Services" condition="is">23</DestinationPort> <!--Telnet-->
+			<DestinationPort name="technique_id=T1071.003,technique_name=Mail Protocols" condition="is">25</DestinationPort> <!--SMTP-->
+			<DestinationPort name="technique_id=T1071.003,technique_name=Mail Protocols" condition="is">143</DestinationPort> <!--IMAP-->
+			<DestinationPort name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="is">3389</DestinationPort> <!--RDP-->
+			<DestinationPort name="technique_id=T1021.005,technique_name=VNC" condition="is">5800</DestinationPort> <!--VNC-->
+			<DestinationPort name="technique_id=T1021.005,technique_name=VNC" condition="is">5900</DestinationPort> <!--VNC-->
+			<DestinationPort name="technique_id=T1021.006,technique_name=Windows Remote Management" condition="is">5985</DestinationPort> <!--WinRM HTTP-->
+			<DestinationPort name="technique_id=T1021.006,technique_name=Windows Remote Management" condition="is">5986</DestinationPort> <!--WinRM HTTPS-->
+			<DestinationPort name="technique_id=T1571,technique_name=Non-Standard Port" condition="is">4444</DestinationPort> <!--Metasploit default-->
+			<DestinationPort name="technique_id=T1090,technique_name=Proxy" condition="is">1080</DestinationPort> <!--SOCKS-->
+			<DestinationPort name="technique_id=T1090,technique_name=Proxy" condition="is">3128</DestinationPort> <!--Proxy-->
+			<DestinationPort name="technique_id=T1090,technique_name=Proxy" condition="is">8080</DestinationPort> <!--Proxy-->
+			<DestinationPort name="technique_id=T1572,technique_name=Protocol Tunneling" condition="is">1723</DestinationPort> <!--PPTP VPN-->
+			<DestinationPort name="technique_id=T1090.003,technique_name=Multi-hop Proxy" condition="is">9001</DestinationPort> <!--Tor-->
+			<DestinationPort name="technique_id=T1090.003,technique_name=Multi-hop Proxy" condition="is">9030</DestinationPort> <!--Tor-->
+			<DestinationPort name="technique_id=T1090.003,technique_name=Multi-hop Proxy" condition="is">9050</DestinationPort> <!--Tor SOCKS-->
+			<DestinationPort name="technique_id=T1090.003,technique_name=Multi-hop Proxy" condition="is">9150</DestinationPort> <!--Tor Browser SOCKS-->
+			<!--SMB to public IP addresses only (exfiltration / NTLM hash leak)-->
+			<Rule groupRelation="and" name="technique_id=T1187,technique_name=Forced Authentication">
+				<DestinationPort condition="is">445</DestinationPort>
+				<DestinationIp condition="not begin with">10.</DestinationIp>
+				<DestinationIp condition="not begin with">192.168.</DestinationIp>
+				<DestinationIp condition="not begin with">127.</DestinationIp>
+				<DestinationIp condition="not begin with">169.254.</DestinationIp>
+				<DestinationIp condition="not begin with">172.16.</DestinationIp>
+				<DestinationIp condition="not begin with">172.17.</DestinationIp>
+				<DestinationIp condition="not begin with">172.18.</DestinationIp>
+				<DestinationIp condition="not begin with">172.19.</DestinationIp>
+				<DestinationIp condition="not begin with">172.20.</DestinationIp>
+				<DestinationIp condition="not begin with">172.21.</DestinationIp>
+				<DestinationIp condition="not begin with">172.22.</DestinationIp>
+				<DestinationIp condition="not begin with">172.23.</DestinationIp>
+				<DestinationIp condition="not begin with">172.24.</DestinationIp>
+				<DestinationIp condition="not begin with">172.25.</DestinationIp>
+				<DestinationIp condition="not begin with">172.26.</DestinationIp>
+				<DestinationIp condition="not begin with">172.27.</DestinationIp>
+				<DestinationIp condition="not begin with">172.28.</DestinationIp>
+				<DestinationIp condition="not begin with">172.29.</DestinationIp>
+				<DestinationIp condition="not begin with">172.30.</DestinationIp>
+				<DestinationIp condition="not begin with">172.31.</DestinationIp>
+				<DestinationIp condition="not begin with">fe80</DestinationIp>
+				<DestinationIp condition="not begin with">fd</DestinationIp>
+				<DestinationIp condition="not begin with">fc</DestinationIp>
+				<DestinationIp condition="not begin with">::1</DestinationIp>
+			</Rule>
+		</NetworkConnect>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<NetworkConnect onmatch="exclude">
+			<!--SECTION: Microsoft Defender (engine only - MpCmdRun.exe stays logged)-->
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</Image>
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\NisSrv.exe</Image>
+			<!--SECTION: Loopback-->
+			<DestinationIp condition="is">127.0.0.1</DestinationIp>
+			<DestinationIp condition="is">::1</DestinationIp>
+			<DestinationIp condition="begin with">fe80:0:0:0</DestinationIp>
+			<!--SECTION: Per-user installed apps (AppData) - exact paths only-->
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDriveStandaloneUpdater.exe</Image>
+			<Image condition="contains all">\AppData\Local\Microsoft\OneDrive\;\FileCoAuth.exe</Image>
+			<Image condition="contains all">\AppData\Local\Microsoft\OneDrive\;\Microsoft.SharePoint.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\Teams\current\Teams.exe</Image> <!--Teams classic-->
+			<Image condition="end with">\AppData\Local\Programs\Microsoft VS Code\Code.exe</Image>
+			<Image condition="end with">\AppData\Roaming\Zoom\bin\Zoom.exe</Image>
+			<Image condition="end with">\AppData\Roaming\Zoom\bin\CptHost.exe</Image> <!--Zoom screen sharing-->
+			<Image condition="end with">\AppData\Local\CiscoSparkLauncher\CiscoCollabHost.exe</Image> <!--Webex App-->
+			<Image condition="contains all">\AppData\Local\WebEx\;\atmgr.exe</Image> <!--Webex Meetings-->
+			<Image condition="contains all">\AppData\Local\WebEx\;\CiscoWebexStart.exe</Image>
+			<Image condition="contains all">\AppData\Local\slack\app-;\slack.exe</Image>
+			<Image condition="contains all">\AppData\Local\Discord\app-;\Discord.exe</Image>
+			<Image condition="end with">\AppData\Local\Programs\signal-desktop\Signal.exe</Image>
+			<Image condition="end with">\AppData\Roaming\Telegram Desktop\Telegram.exe</Image>
+			<Image condition="end with">\AppData\Local\Programs\Notion\Notion.exe</Image>
+			<Image condition="end with">\AppData\Roaming\Spotify\Spotify.exe</Image>
+			<Image condition="end with">\AppData\Roaming\Dropbox\bin\Dropbox.exe</Image>
+			<Image condition="end with">\AppData\Local\Google\Chrome\Application\chrome.exe</Image>
+			<Image condition="end with">\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe</Image>
+			<Image condition="end with">\AppData\Local\Mozilla Firefox\firefox.exe</Image>
+			<Image condition="contains all">\AppData\Local\1Password\app\;\1Password.exe</Image>
+		</NetworkConnect>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 4 : RESERVED FOR SYSMON SERVICE STATUS MESSAGES - cannot be filtered-->
+
+	<!--SYSMON EVENT ID 5 : PROCESS ENDED [ProcessTerminate]-->
+		<!--COMMENT:	Timeline: lifetime of processes from suspicious paths; security/logging tools ending (T1685).-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessTerminate onmatch="include">
+			<!--Suspicious source locations (context for timelines)-->
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Users\</Image> <!--User profiles: AppData, Downloads, Public-->
+			<Image name="Context: process from suspicious path" condition="begin with">C:\ProgramData\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\Temp\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\$Recycle.Bin\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\PerfLogs\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Intel\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\Fonts\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\System32\config\</Image>
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\Tasks\</Image> <!--World-writable-->
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\Tracing\</Image> <!--World-writable-->
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\System32\Tasks\</Image> <!--World-writable-->
+			<Image name="Context: process from suspicious path" condition="begin with">C:\Windows\System32\spool\drivers\color\</Image> <!--World-writable-->
+			<Image name="Context: process from suspicious path" condition="begin with">\</Image> <!--UNC paths, devices, shadow copies-->
+			<!--Security and logging tools ending (also logged once per reboot - correlate with shutdown)-->
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">MsMpEng.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">NisSrv.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">MsSense.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">SecurityHealthService.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">elastic-agent.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">winlogbeat.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">filebeat.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">Sysmon.exe</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="image">Sysmon64.exe</Image>
+		</ProcessTerminate>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 6 : DRIVER LOADED INTO KERNEL [DriverLoad]-->
+		<!--COMMENT:	OFF for now. To enable: include catch-all ImageLoaded contains "\" (T1068) and exclude Signature is "Microsoft Windows" AND SignatureStatus is "Valid". Match hashes against loldrivers.io in ELK.-->
+	<RuleGroup name="" groupRelation="or">
+		<DriverLoad onmatch="include"/>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 7 : DLL (IMAGE) LOADED BY PROCESS [ImageLoad]-->
+		<!--COMMENT:	OFF: CPU cost on every DLL load. Covered by #1, #10, #11, #17 (PSHost) and PowerShell Script Block Logging (4104).-->
+	<RuleGroup name="" groupRelation="or">
+		<ImageLoad onmatch="include"/>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 8 : REMOTE THREAD CREATED [CreateRemoteThread]-->
+		<!--COMMENT:	Process injection (T1055). Everything is logged except Windows core sources.-->
+	<RuleGroup name="" groupRelation="or">
+		<CreateRemoteThread onmatch="include">
+			<!--Catch-all for MITRE tagging; everything not excluded below is logged-->
+			<SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="contains">\</SourceImage>
+		</CreateRemoteThread>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<CreateRemoteThread onmatch="exclude">
+			<!--Windows system sources-->
+			<SourceImage condition="is">C:\Windows\System32\wbem\WmiPrvSE.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\svchost.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\wininit.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\csrss.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\services.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\winlogon.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\audiodg.exe</SourceImage>
+			<!--Console Ctrl+C handler threads (Windows itself) - replaces the old kernel32.dll StartModule exclusion-->
+			<StartFunction condition="is">CtrlRoutine</StartFunction>
+			<!--Microsoft Defender-->
+			<SourceImage condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</SourceImage>
+		</CreateRemoteThread>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 9 : RAW DISK ACCESS [RawAccessRead]-->
+		<!--COMMENT:	OFF: very noisy (backup, AV, defrag). Credential theft via shadow copies is visible in #1/#11. Consider enabling on domain controllers.-->
+	<RuleGroup name="" groupRelation="or">
+		<RawAccessRead onmatch="include"/>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 10 : INTER-PROCESS ACCESS [ProcessAccess]-->
+		<!--COMMENT:	Narrow: LSASS (T1003.001), password managers (T1555.005), injection into browsers (T1055). Query-only access excluded. Watch CallTrace for UNKNOWN.-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessAccess onmatch="include">
+			<!--Credential dumping: any memory-capable access to LSASS-->
+			<TargetImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="is">C:\Windows\System32\lsass.exe</TargetImage>
+			<!--Password manager memory scraping-->
+			<TargetImage name="technique_id=T1555.005,technique_name=Password Managers" condition="is">C:\Program Files\KeePass Password Safe 2\KeePass.exe</TargetImage>
+			<TargetImage name="technique_id=T1555.005,technique_name=Password Managers" condition="is">C:\Program Files\KeePassXC\KeePassXC.exe</TargetImage>
+			<!--Injection into browsers (infostealers, App-Bound Encryption bypass): write/inject rights only-->
+			<Rule groupRelation="and" name="technique_id=T1055,technique_name=Process Injection">
+				<TargetImage condition="contains any">\chrome.exe;\msedge.exe;\firefox.exe;\brave.exe</TargetImage>
+				<GrantedAccess condition="is any">0x1fffff;0x1f3fff;0x1f2fff;0x1f1fff;0x1f0fff;0x143a;0x147a;0x1478;0x47a;0x43a;0x3a;0x2a;0x28</GrantedAccess>
+			</Rule>
+		</ProcessAccess>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<ProcessAccess onmatch="exclude">
+			<!--Query-only access: cannot read or write memory-->
+			<GrantedAccess condition="is any">0x1000;0x1400;0x100000;0x101000;0x101400;0x102000</GrantedAccess>
+			<!--Security / Windows core (taskmgr, procdump, rundll32, WerFault deliberately NOT excluded)-->
+			<SourceImage condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files\Windows Defender Advanced Threat Protection\MsSense.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\wininit.exe</SourceImage>
+			<SourceImage condition="is">C:\Windows\System32\csrss.exe</SourceImage>
+			<!--Browsers managing their own child processes-->
+			<SourceImage condition="is">C:\Program Files\Google\Chrome\Application\chrome.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files (x86)\Google\Chrome\Application\chrome.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files\Microsoft\Edge\Application\msedge.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files\Mozilla Firefox\firefox.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files\Firefox Developer Edition\firefox.exe</SourceImage>
+			<SourceImage condition="is">C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe</SourceImage>
+			<SourceImage condition="end with">\AppData\Local\Google\Chrome\Application\chrome.exe</SourceImage>
+			<SourceImage condition="end with">\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe</SourceImage>
+			<!--Per customer: exclude recurring legitimate readers as SourceImage AND GrantedAccess pairs (Rule groupRelation="and")-->
+		</ProcessAccess>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 11 : FILE CREATED [FileCreate]-->
+		<!--COMMENT:	Scripts, containers, Office/macro carriers, persistence locations, dumps. PE files (.exe/.dll/.sys/...) are handled by #29 with hashes.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileCreate onmatch="include">
+			<!--Persistence locations-->
+			<TargetFilename name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">\Start Menu</TargetFilename>
+			<TargetFilename name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">\Startup\</TargetFilename> <!--also Word STARTUP folder-->
+			<TargetFilename name="technique_id=T1137,technique_name=Office Application Startup" condition="contains">\XLSTART\</TargetFilename> <!--Excel startup folder-->
+			<TargetFilename name="technique_id=T1547,technique_name=Boot or Logon Autostart Execution" condition="begin with">C:\Users\Default</TargetFilename> <!--Default user profile-->
+			<TargetFilename name="technique_id=T1543.003,technique_name=Windows Service" condition="begin with">C:\Windows\System32\Drivers</TargetFilename>
+			<TargetFilename name="technique_id=T1543.003,technique_name=Windows Service" condition="begin with">C:\Windows\SysWOW64\Drivers</TargetFilename>
+			<TargetFilename name="technique_id=T1037.001,technique_name=Logon Script (Windows)" condition="begin with">C:\Windows\System32\GroupPolicy\Machine\Scripts</TargetFilename>
+			<TargetFilename name="technique_id=T1037.001,technique_name=Logon Script (Windows)" condition="begin with">C:\Windows\System32\GroupPolicy\User\Scripts</TargetFilename>
+			<TargetFilename name="technique_id=T1546.003,technique_name=Windows Management Instrumentation Event Subscription" condition="begin with">C:\Windows\System32\Wbem</TargetFilename>
+			<TargetFilename name="technique_id=T1546.003,technique_name=Windows Management Instrumentation Event Subscription" condition="begin with">C:\Windows\SysWOW64\Wbem</TargetFilename>
+			<TargetFilename name="technique_id=T1546.013,technique_name=PowerShell Profile" condition="begin with">C:\Windows\System32\WindowsPowerShell</TargetFilename>
+			<TargetFilename name="technique_id=T1546.013,technique_name=PowerShell Profile" condition="begin with">C:\Windows\SysWOW64\WindowsPowerShell</TargetFilename>
+			<TargetFilename name="technique_id=T1053.005,technique_name=Scheduled Task" condition="begin with">C:\Windows\Tasks\</TargetFilename>
+			<TargetFilename name="technique_id=T1053.005,technique_name=Scheduled Task" condition="begin with">C:\Windows\System32\Tasks</TargetFilename>
+			<TargetFilename name="technique_id=T1053.005,technique_name=Scheduled Task" condition="begin with">C:\Windows\SysWOW64\Tasks</TargetFilename>
+			<TargetFilename name="technique_id=T1546.011,technique_name=Application Shimming" condition="begin with">C:\Windows\AppPatch\Custom</TargetFilename> <!--Application shims-->
+			<TargetFilename name="technique_id=T1548.002,technique_name=Bypass User Account Control" condition="contains">VirtualStore</TargetFilename> <!--UAC virtualization-->
+			<TargetFilename name="technique_id=T1098.004,technique_name=SSH Authorized Keys" condition="contains">\.ssh\authorized_keys</TargetFilename>
+			<TargetFilename name="technique_id=T1098.004,technique_name=SSH Authorized Keys" condition="is">C:\ProgramData\ssh\administrators_authorized_keys</TargetFilename>
+			<TargetFilename name="technique_id=T1505.003,technique_name=Web Shell" condition="begin with">C:\inetpub\</TargetFilename> <!--Webshells on IIS-->
+			<Image name="technique_id=T1006,technique_name=Direct Volume Access" condition="begin with">\Device\HarddiskVolumeShadowCopy</Image> <!--Nothing should execute from a shadow copy-->
+			<!--Delivery locations-->
+			<TargetFilename name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="contains">\Downloads\</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="contains">\Content.Outlook\</TargetFilename> <!--Outlook classic attachments-->
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="contains">\Microsoft\Olk\Attachments\</TargetFilename> <!--New Outlook attachments-->
+			<!--Credential theft artifacts-->
+			<TargetFilename name="technique_id=T1003.001,technique_name=LSASS Memory" condition="end with">.dmp</TargetFilename> <!--Process dumps (LSASS)-->
+			<TargetFilename name="technique_id=T1003.003,technique_name=NTDS" condition="end with">.dit</TargetFilename>
+			<TargetFilename name="technique_id=T1558,technique_name=Steal or Forge Kerberos Tickets" condition="end with">.kirbi</TargetFilename>
+			<!--Scripts-->
+			<TargetFilename name="technique_id=T1059.001,technique_name=PowerShell" condition="end with">.ps1</TargetFilename>
+			<TargetFilename name="technique_id=T1059.001,technique_name=PowerShell" condition="end with">.psm1</TargetFilename>
+			<TargetFilename name="technique_id=T1059.001,technique_name=PowerShell" condition="end with">.psd1</TargetFilename>
+			<TargetFilename name="technique_id=T1059.003,technique_name=Windows Command Shell" condition="end with">.bat</TargetFilename>
+			<TargetFilename name="technique_id=T1059.003,technique_name=Windows Command Shell" condition="end with">.cmd</TargetFilename>
+			<TargetFilename name="technique_id=T1059.005,technique_name=Visual Basic" condition="end with">.vbs</TargetFilename>
+			<TargetFilename name="technique_id=T1059.005,technique_name=Visual Basic" condition="end with">.vbe</TargetFilename>
+			<TargetFilename name="technique_id=T1059.005,technique_name=Visual Basic" condition="end with">.wsf</TargetFilename>
+			<TargetFilename name="technique_id=T1059.005,technique_name=Visual Basic" condition="end with">.wsh</TargetFilename>
+			<TargetFilename name="technique_id=T1059.005,technique_name=Visual Basic" condition="end with">.wsc</TargetFilename>
+			<TargetFilename name="technique_id=T1059.007,technique_name=JavaScript" condition="end with">.js</TargetFilename>
+			<TargetFilename name="technique_id=T1059.007,technique_name=JavaScript" condition="end with">.jse</TargetFilename>
+			<TargetFilename name="technique_id=T1218.005,technique_name=Mshta" condition="end with">.hta</TargetFilename>
+			<TargetFilename name="technique_id=T1218.010,technique_name=Regsvr32" condition="end with">.sct</TargetFilename>
+			<!--Containers (Mark-of-the-Web bypass)-->
+			<TargetFilename name="technique_id=T1553.005,technique_name=Mark-of-the-Web Bypass" condition="end with">.iso</TargetFilename>
+			<TargetFilename name="technique_id=T1553.005,technique_name=Mark-of-the-Web Bypass" condition="end with">.img</TargetFilename>
+			<TargetFilename name="technique_id=T1553.005,technique_name=Mark-of-the-Web Bypass" condition="end with">.vhd</TargetFilename>
+			<TargetFilename name="technique_id=T1553.005,technique_name=Mark-of-the-Web Bypass" condition="end with">.vhdx</TargetFilename>
+			<!--Shortcuts and shell files-->
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.lnk</TargetFilename>
+			<TargetFilename name="technique_id=T1553.005,technique_name=Mark-of-the-Web Bypass" condition="end with">.url</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.search-ms</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.library-ms</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.settingcontent-ms</TargetFilename>
+			<TargetFilename name="technique_id=T1187,technique_name=Forced Authentication" condition="end with">.scf</TargetFilename>
+			<!--Installers / packages / ClickOnce-->
+			<TargetFilename name="technique_id=T1218.007,technique_name=Msiexec" condition="end with">.msi</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.msix</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.appx</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.appinstaller</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.application</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.appref-ms</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.jar</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.jnlp</TargetFilename>
+			<!--Other executable formats-->
+			<TargetFilename name="technique_id=T1218.001,technique_name=Compiled HTML File" condition="end with">.chm</TargetFilename>
+			<TargetFilename name="technique_id=T1218.014,technique_name=MMC" condition="end with">.msc</TargetFilename>
+			<TargetFilename name="technique_id=T1218,technique_name=System Binary Proxy Execution" condition="end with">.inf</TargetFilename>
+			<TargetFilename name="technique_id=T1112,technique_name=Modify Registry" condition="end with">.reg</TargetFilename>
+			<TargetFilename name="technique_id=T1027.004,technique_name=Compile After Delivery" condition="end with">.cmdline</TargetFilename>
+			<TargetFilename name="technique_id=T1127.001,technique_name=MSBuild" condition="end with">proj</TargetFilename>
+			<TargetFilename name="technique_id=T1127.001,technique_name=MSBuild" condition="end with">.sln</TargetFilename>
+			<TargetFilename name="technique_id=T1620,technique_name=Reflective Code Loading" condition="end with">.exe.log</TargetFilename>
+			<TargetFilename name="technique_id=T1176.001,technique_name=Browser Extensions" condition="end with">.crx</TargetFilename>
+			<TargetFilename name="technique_id=T1053.005,technique_name=Scheduled Task" condition="end with">.job</TargetFilename>
+			<!--Office: macros, add-ins, legacy and exploit carriers-->
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.docm</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.xlsm</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">.pptm</TargetFilename>
+			<TargetFilename name="technique_id=T1137,technique_name=Office Application Startup" condition="end with">.dotm</TargetFilename>
+			<TargetFilename name="technique_id=T1137.006,technique_name=Add-ins" condition="end with">.xlam</TargetFilename>
+			<TargetFilename name="technique_id=T1137.006,technique_name=Add-ins" condition="end with">.ppam</TargetFilename>
+			<TargetFilename name="technique_id=T1137.006,technique_name=Add-ins" condition="end with">.xll</TargetFilename>
+			<TargetFilename name="technique_id=T1137.006,technique_name=Add-ins" condition="end with">.wll</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.xls</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.ppt</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.rtf</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.iqy</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.slk</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.one</TargetFilename>
+			<TargetFilename name="technique_id=T1566.001,technique_name=Spearphishing Attachment" condition="end with">.onepkg</TargetFilename>
+		</FileCreate>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileCreate onmatch="exclude">
+			<!--SECTION: Recent items (Windows/Office write a .lnk on every file open)-->
+			<TargetFilename condition="contains">\Microsoft\Windows\Recent\</TargetFilename>
+			<TargetFilename condition="contains">\Microsoft\Office\Recent\</TargetFilename>
+			<!--SECTION: Windows (from base config)-->
+			<Image condition="is">C:\Program Files (x86)\EMET 5.5\EMET_Service.exe</Image>
+			<Image condition="is">C:\Windows\System32\smss.exe</Image>
+			<Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+			<Image condition="is">\\?\C:\Windows\System32\wbem\WMIADAP.EXE</Image>
+			<Image condition="is">C:\Windows\System32\mobsync.exe</Image>
+			<TargetFilename condition="begin with">C:\Windows\System32\wbem\Performance\</TargetFilename>
+			<!--SECTION: Windows servicing / Windows Update-->
+			<Image condition="is">C:\Windows\servicing\TrustedInstaller.exe</Image>
+			<Image condition="begin with">C:\Windows\WinSxS\</Image> <!--TiWorker.exe-->
+			<Image condition="is">C:\Windows\System32\MpSigStub.exe</Image> <!--Defender update stub-->
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</Image>
+			<!--SECTION: Office Click-to-Run-->
+			<Image condition="is">C:\Program Files\Common Files\microsoft shared\ClickToRun\OfficeClickToRun.exe</Image>
+			<Image condition="is">C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe</Image>
+			<!--SECTION: Browser updaters (machine-wide)-->
+			<Image condition="begin with">C:\Program Files (x86)\Microsoft\EdgeUpdate\</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Microsoft\Edge\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files\Microsoft\Edge\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Microsoft\EdgeWebView\Application\;\Installer\setup.exe</Image>
+			<Image condition="begin with">C:\Program Files (x86)\Google\GoogleUpdater\</Image>
+			<Image condition="begin with">C:\Program Files (x86)\Google\Update\</Image>
+			<Image condition="contains all">C:\Program Files\Google\Chrome\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Google\Chrome\Application\;\Installer\setup.exe</Image>
+			<Image condition="begin with">C:\Program Files (x86)\BraveSoftware\Update\</Image>
+			<Image condition="contains all">C:\Program Files\BraveSoftware\Brave-Browser\Application\;\Installer\setup.exe</Image>
+			<Image condition="is">C:\Program Files\Mozilla Firefox\updater.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\updater.exe</Image>
+			<Image condition="is">C:\Program Files (x86)\Mozilla Maintenance Service\maintenanceservice.exe</Image>
+			<!--SECTION: OneDrive (per-user install, exact paths)-->
+			<Image condition="is">C:\Program Files\Microsoft OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDriveStandaloneUpdater.exe</Image>
+			<Image condition="contains all">\AppData\Local\Microsoft\OneDrive\;\OneDriveSetup.exe</Image>
+			<!--SECTION: Servicing / package stores (TargetFilename)-->
+			<TargetFilename condition="begin with">C:\Windows\SoftwareDistribution\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Windows\WinSxS\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Program Files\WindowsApps\</TargetFilename> <!--Store apps, new Teams-->
+			<TargetFilename condition="begin with">C:\Windows\assembly\</TargetFilename> <!--.NET native images-->
+			<TargetFilename condition="begin with">C:\ProgramData\Microsoft\Windows Defender\Definition Updates\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Windows\System32\DriverStore\Temp\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Windows\Installer\</TargetFilename>
+			<TargetFilename condition="begin with">C:\$WINDOWS.~BT\Sources\</TargetFilename> <!--Feature updates-->
+		</FileCreate>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 12 & 13 & 14 : REGISTRY MODIFICATION [RegistryEvent]-->
+		<!--COMMENT:	Persistence, defense impairment and credential settings. Prefixes: HKLM, HKU, HKCR. Details cannot be filtered.-->
+	<RuleGroup name="" groupRelation="or">
+		<RegistryEvent onmatch="include">
+			<!--Autorun / logon-->
+			<TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">CurrentVersion\Run</TargetObject> <!--Run, RunOnce, RunOnceEx, RunServices-->
+			<TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">Policies\Explorer\Run</TargetObject>
+			<TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">CurrentVersion\Windows\Load</TargetObject>
+			<TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">CurrentVersion\Windows\Run</TargetObject>
+			<TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="end with">user shell folders\startup</TargetObject> <!--Startup folder relocated-->
+			<TargetObject name="technique_id=T1037.001,technique_name=Logon Script (Windows)" condition="contains">Group Policy\Scripts</TargetObject>
+			<TargetObject name="technique_id=T1037.001,technique_name=Logon Script (Windows)" condition="contains">Windows\System\Scripts</TargetObject>
+			<TargetObject name="technique_id=T1037.001,technique_name=Logon Script (Windows)" condition="contains">UserInitMprLogonScript</TargetObject>
+			<TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="contains">CurrentVersion\Winlogon\Shell</TargetObject>
+			<TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="contains">CurrentVersion\Winlogon\System</TargetObject>
+			<TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Notify</TargetObject>
+			<TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Userinit</TargetObject>
+			<TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Winlogon\</TargetObject>
+			<TargetObject name="technique_id=T1547,technique_name=Boot or Logon Autostart Execution" condition="begin with">HKLM\Software\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Drivers32</TargetObject>
+			<TargetObject name="technique_id=T1547,technique_name=Boot or Logon Autostart Execution" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\BootExecute</TargetObject>
+			<TargetObject name="technique_id=T1547,technique_name=Boot or Logon Autostart Execution" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp\InitialProgram</TargetObject>
+			<TargetObject name="technique_id=T1547,technique_name=Boot or Logon Autostart Execution" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Services\WinSock</TargetObject> <!--Winsock LSP-->
+			<TargetObject name="technique_id=T1546,technique_name=Event Triggered Execution" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\AeDebug</TargetObject> <!--Crash debugger-->
+			<!--Scheduled tasks (incl. hidden tasks with deleted SD - Tarrask)-->
+			<TargetObject name="technique_id=T1053.005,technique_name=Scheduled Task" condition="begin with">HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\</TargetObject>
+			<!--Services-->
+			<TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="end with">\ServiceDll</TargetObject>
+			<TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="end with">\ServiceManifest</TargetObject>
+			<TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="end with">\ImagePath</TargetObject>
+			<TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="end with">\Start</TargetObject> <!--Start mode changes - tune noisy services in the exclude list-->
+			<TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="end with">\FailureCommand</TargetObject>
+			<!--RDP-->
+			<TargetObject name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="end with">Control\Terminal Server\WinStations\RDP-Tcp\PortNumber</TargetObject>
+			<TargetObject name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="end with">Control\Terminal Server\fSingleSessionPerUser</TargetObject>
+			<TargetObject name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="end with">fDenyTSConnections</TargetObject>
+			<TargetObject name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="end with">Control\Terminal Server\WinStations\RDP-Tcp\UserAuthentication</TargetObject> <!--NLA disabled-->
+			<TargetObject name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="end with">Control\Terminal Server\WinStations\RDP-Tcp\SecurityLayer</TargetObject>
+			<TargetObject name="technique_id=T1021.001,technique_name=Remote Desktop Protocol" condition="end with">\Terminal Services\Shadow</TargetObject> <!--Silent session shadowing-->
+			<TargetObject name="Context: last logged on user changed" condition="end with">LastLoggedOnUser</TargetObject>
+			<TargetObject name="technique_id=T1090,technique_name=Proxy" condition="contains">\PortProxy\</TargetObject> <!--netsh portproxy-->
+			<!--File associations, COM and shell extensions-->
+			<TargetObject name="technique_id=T1546.001,technique_name=Change Default File Association" condition="contains">\command\</TargetObject>
+			<TargetObject name="technique_id=T1546.001,technique_name=Change Default File Association" condition="contains">\ddeexec\</TargetObject>
+			<TargetObject name="technique_id=T1546.001,technique_name=Change Default File Association" condition="contains">exefile</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">{86C86720-42A0-1069-A2E8-08002B30309D}</TargetObject> <!--Tooltip handler-->
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="end with">\InprocServer32\(Default)</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="end with">\LocalServer32\(Default)</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">\TreatAs\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">Classes\*\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">Classes\AllFilesystemObjects\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">Classes\Directory\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">Classes\Drive\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">Classes\Folder\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">Classes\PROTOCOLS\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">ContextMenuHandlers\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="contains">CurrentVersion\Shell</TargetObject> <!--ShellExecuteHooks, ShellIconOverlayIdentifiers, ShellServiceObjects-->
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\explorer\ShellExecuteHooks</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\explorer\ShellServiceObjectDelayLoad</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\explorer\ShellIconOverlayIdentifiers</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Classes\CLSID\{AB8902B4-09CA-4BB6-B78D-A8F59079A8D5}\</TargetObject> <!--Thumbnail cache autostart-->
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Classes\WOW6432Node\CLSID\{AB8902B4-09CA-4BB6-B78D-A8F59079A8D5}\</TargetObject>
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Classes\CLSID\{083863F1-70DE-11d0-BD40-00A0C911CE86}\</TargetObject> <!--DirectX instances-->
+			<TargetObject name="technique_id=T1546.015,technique_name=Component Object Model Hijacking" condition="begin with">HKLM\Software\Classes\WOW6432Node\CLSID\{083863F1-70DE-11d0-BD40-00A0C911CE86}\</TargetObject>
+			<TargetObject name="technique_id=T1574,technique_name=Hijack Execution Flow" condition="contains">\App Paths\</TargetObject> <!--App Paths hijacking (HKLM and HKCU)-->
+			<!--Event triggered execution / hijacking-->
+			<TargetObject name="technique_id=T1546.012,technique_name=Image File Execution Options Injection" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\</TargetObject>
+			<TargetObject name="technique_id=T1546.012,technique_name=Image File Execution Options Injection" condition="begin with">HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\</TargetObject>
+			<TargetObject name="technique_id=T1546.010,technique_name=AppInit DLLs" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\Windows\Appinit_Dlls\</TargetObject>
+			<TargetObject name="technique_id=T1546.010,technique_name=AppInit DLLs" condition="begin with">HKLM\Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Windows\Appinit_Dlls\</TargetObject>
+			<TargetObject name="technique_id=T1546.009,technique_name=AppCert DLLs" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\AppCertDlls\</TargetObject>
+			<TargetObject name="technique_id=T1546.007,technique_name=Netsh Helper DLL" condition="begin with">HKLM\Software\Microsoft\Netsh</TargetObject>
+			<TargetObject name="technique_id=T1546.011,technique_name=Application Shimming" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Custom</TargetObject>
+			<TargetObject name="technique_id=T1546.011,technique_name=Application Shimming" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\InstalledSDB</TargetObject>
+			<TargetObject name="technique_id=T1574.012,technique_name=COR_PROFILER" condition="end with">\COR_PROFILER</TargetObject>
+			<TargetObject name="technique_id=T1574.012,technique_name=COR_PROFILER" condition="end with">\COR_PROFILER_PATH</TargetObject>
+			<TargetObject name="technique_id=T1574.012,technique_name=COR_PROFILER" condition="end with">\COR_ENABLE_PROFILING</TargetObject>
+			<TargetObject name="technique_id=T1574.012,technique_name=COR_PROFILER" condition="end with">\CORECLR_PROFILER_PATH</TargetObject>
+			<TargetObject name="technique_id=T1547.010,technique_name=Port Monitors" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\</TargetObject>
+			<TargetObject name="technique_id=T1547.012,technique_name=Print Processors" condition="contains">\Print Processors\</TargetObject>
+			<TargetObject name="technique_id=T1547.003,technique_name=Time Providers" condition="contains">\Services\W32Time\TimeProviders\</TargetObject>
+			<!--Credentials / authentication-->
+			<TargetObject name="technique_id=T1547.002,technique_name=Authentication Package" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Lsa\</TargetObject> <!--Auth/Notification/Security packages, RunAsPPL, LmCompatibilityLevel-->
+			<TargetObject name="technique_id=T1547.005,technique_name=Security Support Provider" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders</TargetObject> <!--incl. WDigest UseLogonCredential-->
+			<TargetObject name="technique_id=T1556,technique_name=Modify Authentication Process" condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\Authentication\Credential Provider</TargetObject>
+			<TargetObject name="technique_id=T1556.008,technique_name=Network Provider DLL" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\NetworkProvider\Order\</TargetObject>
+			<!--Group Policy integrity-->
+			<TargetObject name="technique_id=T1484.001,technique_name=Group Policy Modification" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\GPExtensions\</TargetObject>
+			<!--Defense impairment: Defender, AMSI, logging, Sysmon, Security Center-->
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="begin with">HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\</TargetObject> <!--Add-MpPreference -ExclusionPath-->
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="begin with">HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\</TargetObject> <!--All Defender policies incl. ASR and exclusions-->
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\Windows Defender\Features\TamperProtection</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\DisableAntiSpyware</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\DisableAntiVirus</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\SpynetReporting</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">DisableRealtimeMonitoring</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\SubmitSamplesConsent</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="begin with">HKLM\SOFTWARE\Microsoft\AMSI\Providers\</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="contains">\Services\Sysmon</TargetObject> <!--Sysmon service / driver / config-->
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="begin with">HKLM\Software\Microsoft\Security Center\</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\HideSCAHealth</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\VBAWarnings</TargetObject> <!--Office macro security-->
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">\AccessVBOM</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="contains">\Trusted Locations\</TargetObject>
+			<TargetObject name="technique_id=T1685.001,technique_name=Disable or Modify Windows Event Log" condition="contains">\PowerShell\ScriptBlockLogging</TargetObject>
+			<TargetObject name="technique_id=T1685.001,technique_name=Disable or Modify Windows Event Log" condition="contains">\PowerShellCore\</TargetObject>
+			<TargetObject name="technique_id=T1685.001,technique_name=Disable or Modify Windows Event Log" condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\WINEVT\</TargetObject>
+			<TargetObject name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="begin with">HKLM\Software\Microsoft\Tracing\RASAPI32</TargetObject>
+			<TargetObject name="technique_id=T1688,technique_name=Safe Mode Boot" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Control\Safeboot\</TargetObject>
+			<!--UAC and system policies (EnableLUA, LocalAccountTokenFilterPolicy, ConsentPromptBehaviorAdmin, DisableTaskMgr, ...)-->
+			<TargetObject name="technique_id=T1548.002,technique_name=Bypass User Account Control" condition="contains">\CurrentVersion\Policies\System\</TargetObject>
+			<TargetObject name="technique_id=T1548.002,technique_name=Bypass User Account Control" condition="contains">VirtualStore</TargetObject> <!--Registry virtualization-->
+			<!--Firewall-->
+			<TargetObject name="technique_id=T1686.003,technique_name=Windows Host Firewall" condition="end with">\EnableFirewall</TargetObject>
+			<TargetObject name="technique_id=T1686.003,technique_name=Windows Host Firewall" condition="end with">\DoNotAllowExceptions</TargetObject>
+			<TargetObject name="technique_id=T1686.003,technique_name=Windows Host Firewall" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile\AuthorizedApplications\List</TargetObject>
+			<TargetObject name="technique_id=T1686.003,technique_name=Windows Host Firewall" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile\AuthorizedApplications\List</TargetObject>
+			<TargetObject name="technique_id=T1686.003,technique_name=Windows Host Firewall" condition="begin with">HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules\</TargetObject>
+			<!--Ransomware: BitLocker abuse (ShrinkLocker)-->
+			<TargetObject name="technique_id=T1486,technique_name=Data Encrypted for Impact" condition="begin with">HKLM\SOFTWARE\Policies\Microsoft\FVE\</TargetObject>
+			<!--Proxy settings-->
+			<TargetObject name="technique_id=T1090,technique_name=Proxy" condition="end with">\ProxyServer</TargetObject>
+			<TargetObject name="technique_id=T1090,technique_name=Proxy" condition="contains">Software\Microsoft\Windows\CurrentVersion\Internet Settings\ProxyEnable</TargetObject>
+			<!--Office persistence-->
+			<TargetObject name="technique_id=T1137.006,technique_name=Add-ins" condition="contains">Microsoft\Office\Outlook\Addins\</TargetObject>
+			<TargetObject name="technique_id=T1137.002,technique_name=Office Test" condition="contains">Office Test\</TargetObject>
+			<TargetObject name="technique_id=T1137.006,technique_name=Add-ins" condition="contains">\Excel\Options\OPEN</TargetObject> <!--XLL auto-load-->
+			<TargetObject name="technique_id=T1137.004,technique_name=Outlook Home Page" condition="contains">\Outlook\Today\</TargetObject>
+			<TargetObject name="technique_id=T1137.004,technique_name=Outlook Home Page" condition="contains">\Outlook\WebView\</TargetObject>
+			<TargetObject name="technique_id=T1204.002,technique_name=Malicious File" condition="contains">Security\Trusted Documents\TrustRecords</TargetObject> <!--User clicked Enable Editing / Enable Macros-->
+			<!--Browser extensions (legacy IE / BHO)-->
+			<TargetObject name="technique_id=T1176.001,technique_name=Browser Extensions" condition="contains">Internet Explorer\Toolbar\</TargetObject>
+			<TargetObject name="technique_id=T1176.001,technique_name=Browser Extensions" condition="contains">Internet Explorer\Extensions\</TargetObject>
+			<TargetObject name="technique_id=T1176.001,technique_name=Browser Extensions" condition="contains">Browser Helper Objects\</TargetObject>
+			<TargetObject name="technique_id=T1112,technique_name=Modify Registry" condition="end with">\DisableSecuritySettingsCheck</TargetObject>
+			<TargetObject name="technique_id=T1112,technique_name=Modify Registry" condition="end with">\3\1206</TargetObject> <!--IE zone: scripting-->
+			<TargetObject name="technique_id=T1112,technique_name=Modify Registry" condition="end with">\3\2500</TargetObject> <!--IE zone: protected mode-->
+			<TargetObject name="technique_id=T1112,technique_name=Modify Registry" condition="end with">\3\1809</TargetObject> <!--IE zone: pop-up blocker-->
+			<!--Hidden files / extensions-->
+			<TargetObject name="technique_id=T1564.001,technique_name=Hidden Files and Directories" condition="end with">\Hidden</TargetObject>
+			<TargetObject name="technique_id=T1564.001,technique_name=Hidden Files and Directories" condition="end with">\ShowSuperHidden</TargetObject>
+			<TargetObject name="technique_id=T1564.001,technique_name=Hidden Files and Directories" condition="end with">\HideFileExt</TargetObject>
+			<!--Context (investigation timeline, not detections)-->
+			<TargetObject name="technique_id=T1204.002,technique_name=Malicious File" condition="end with">\UrlUpdateInfo</TargetObject> <!--ClickOnce source URL-->
+			<TargetObject name="Context: install source" condition="end with">\InstallSource</TargetObject>
+			<TargetObject name="Context: Sysinternals tool used" condition="end with">\EulaAccepted</TargetObject>
+			<TargetObject name="Context: Office contacted domain" condition="end with">\EnableBHO</TargetObject>
+			<TargetObject name="Context: new network" condition="begin with">HKLM\Software\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles</TargetObject>
+			<TargetObject name="Context: device connected" condition="end with">\FriendlyName</TargetObject>
+			<TargetObject name="Context: MSI installer started" condition="is">HKLM\Software\Microsoft\Windows\CurrentVersion\Installer\InProgress\(Default)</TargetObject>
+			<TargetObject name="Context: keyboard layout" condition="contains">\Keyboard Layout\Preload</TargetObject>
+			<TargetObject name="Context: keyboard layout" condition="contains">\Keyboard Layout\Substitutes</TargetObject>
+			<!--Suspicious sources-->
+			<Image name="technique_id=T1112,technique_name=Modify Registry" condition="end with">regedit.exe</Image>
+			<Image name="technique_id=T1006,technique_name=Direct Volume Access" condition="begin with">\</Image> <!--Devices / shadow copies should not modify the registry-->
+		</RegistryEvent>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<RegistryEvent onmatch="exclude">
+			<!--COMMENT:	Remove low-information noise. Often these hide a procress recreating an empty key and do not hide the values created subsequently.-->
+			<!--NOTE:	A lot of noise can be removed by excluding CreateKey events, which are largely innocuous-->
+			<TargetObject condition="contains">\{CAFEEFAC-</TargetObject>
+			<EventType condition="is">CreateKey</EventType>
+			<TargetObject condition="begin with">HKLM\COMPONENTS</TargetObject>
+			<!--Inventory noise-->
+			<TargetObject condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache</TargetObject>
+			<!--Misc-->
+			<TargetObject condition="end with">Toolbar\WebBrowser</TargetObject> <!--Microsoft:IE: Extraneous activity-->
+			<TargetObject condition="end with">Browser\ITBar7Height</TargetObject> <!--Microsoft:IE: Extraneous activity, covers ShellBrowser and WebBrowser-->
+			<TargetObject condition="end with">Browser\ITBar7Layout</TargetObject> <!--Microsoft:IE: Extraneous activity-->
+			<TargetObject condition="end with">Internet Explorer\Toolbar\Locked</TargetObject> <!--Windows:Explorer: Extraneous activity-->
+			<TargetObject condition="end with">Toolbar\WebBrowser\{47833539-D0C5-4125-9FA8-0819E2EAAC93}</TargetObject> <!--Windows:Explorer: Extraneous activity-->
+			<TargetObject condition="end with">}\PreviousPolicyAreas</TargetObject> <!--Windows: Remove noise from \Winlogon\GPExtensions by svchost.exe-->
+			<TargetObject condition="contains">\Control\WMI\Autologger\</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<TargetObject condition="end with">HKLM\SYSTEM\CurrentControlSet\Services\UsoSvc\Start</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<TargetObject condition="end with">\Lsa\OfflineJoin\CurrentValue</TargetObject> <!--Windows: Sensitive value during domain join-->
+			<TargetObject condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\</TargetObject> <!--Windows: Remove noise monitoring installations run as system-->
+			<TargetObject condition="contains">_Classes\AppX</TargetObject> <!--Windows: Remove noise monitoring "Shell\open\command"--> <!--Win8+-->
+			<TargetObject condition="begin with">HKLM\Software\Microsoft\Windows\CurrentVersion\WINEVT\Publishers\</TargetObject> <!--Windows: SvcHost Noise-->
+			<!--Bootup Control noise-->
+			<TargetObject condition="end with">HKLM\SYSTEM\CurrentControlSet\Control\Lsa\LsaPid</TargetObject> <!--Windows:lsass.exe: Boot noise-->
+			<TargetObject condition="end with">HKLM\SYSTEM\CurrentControlSet\Control\Lsa\SspiCache</TargetObject> <!--Windows:lsass.exe: Boot noise--> <!--Win8+-->
+			<TargetObject condition="end with">HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Domains</TargetObject> <!--Windows:lsass.exe: Boot noise--> <!--Win8+-->
+			<!--Services startup settings noise, some low-risk services routinely change it and this can be ignored-->
+			<TargetObject condition="end with">\Services\BITS\Start</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<TargetObject condition="end with">\services\clr_optimization_v2.0.50727_32\Start</TargetObject> <!--Microsoft:dotNet: Windows 7-->
+			<TargetObject condition="end with">\services\clr_optimization_v2.0.50727_64\Start</TargetObject> <!--Microsoft:dotNet: Windows 7-->
+			<TargetObject condition="end with">\services\clr_optimization_v4.0.30319_32\Start</TargetObject> <!--Microsoft:dotNet: Windows 10-->
+			<TargetObject condition="end with">\services\clr_optimization_v4.0.30319_64\Start</TargetObject> <!--Microsoft:dotNet: Windows 10-->
+			<TargetObject condition="end with">\services\deviceAssociationService\Start</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<TargetObject condition="end with">\services\fhsvc\Start</TargetObject> <!--Windows: File History Service-->
+			<TargetObject condition="end with">\services\nal\Start</TargetObject> <!--Intel: Network adapter diagnostic driver-->
+			<TargetObject condition="end with">\services\trustedInstaller\Start</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<TargetObject condition="end with">\services\tunnel\Start</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<TargetObject condition="end with">\services\usoSvc\Start</TargetObject> <!--Windows: Remove noise from monitoring "\Start"-->
+			<!--FileExts noise filtering-->
+			<TargetObject condition="end with">\UserChoice\ProgId</TargetObject> <!--Windows: Remove noise from monitoring "FileExts"--> <!--Win8+-->
+			<TargetObject condition="end with">\UserChoice\Hash</TargetObject> <!--Windows: Remove noise from monitoring "FileExts"--> <!--Win8+-->
+			<TargetObject condition="end with">\OpenWithList\MRUList</TargetObject> <!--Windows: Remove noise from monitoring "FileExts"-->
+			<TargetObject condition="contains">Shell Extentions\Cached</TargetObject> <!--Windows: Remove noise generated by explorer.exe on monitored ShellCached binary keys--> <!--Win8+-->
+			<!--Group Policy noise-->
+			<TargetObject condition="end with">HKLM\System\CurrentControlSet\Control\Lsa\Audit\SpecialGroups</TargetObject> <!--Windows: Routinely set through Group Policy, not especially important to log-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\PSScriptOrder</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\SOM-ID</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\GPO-ID</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0\IsPowershell</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0\ExecTime</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0\PSScriptOrder</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0\SOM-ID</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0\GPO-ID</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0\0\IsPowershell</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="end with">SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0\0\ExecTime</TargetObject> <!--Windows:Group Policy: Noise below the actual key while building-->
+			<TargetObject condition="contains">\safer\codeidentifiers\0\HASHES\{</TargetObject> <!--Windows: Software Restriction Policies. Can be used to disable security tools, but very noisy to monitor if you use it-->
+			<!--SECTION: Office C2R-->
+			<TargetObject condition="contains">VirtualStore\MACHINE\SOFTWARE\Microsoft\Office\ClickToRun\</TargetObject> <!--Microsoft: SearchProtocolHost writes to OfficeC2R registry for Outlook, seemingly regarding mail indexing-->
+			<TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Office\ClickToRun\</TargetObject> <!--Microsoft: Virtual registry for Office-->
+			<!--SECTION: 3rd party-->
+			<Image condition="is">C:\Program Files\WIDCOMM\Bluetooth Software\btwdins.exe</Image> <!--Constantly writes to HKLM-->
+			<TargetObject condition="begin with">HKCR\VLC.</TargetObject> <!--VLC update noise-->
+			<TargetObject condition="begin with">HKCR\iTunes.</TargetObject> <!--Apple: iTunes update noise-->
+			<!--WINEVT publishers noise-->
+			<TargetObject condition="is">HKLM\Software\Microsoft\Windows\CurrentVersion\WINEVT\Publishers\{945a8954-c147-4acd-923f-40c45405a658}</TargetObject> <!--Windows update-->
+			<!--Scheduled task run statistics (updated on every task run)-->
+			<TargetObject condition="end with">\DynamicInfo</TargetObject>
+		</RegistryEvent>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 15 : ALTERNATE DATA STREAM CREATED [FileCreateStreamHash]-->
+		<!--COMMENT:	Mark-of-the-Web: Contents holds ZoneId, ReferrerUrl, HostUrl (download source). Parse with a kv filter in ELK.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileCreateStreamHash onmatch="include">
+			<!--Layer A: every download from browsers, mail and messengers (any folder)-->
+			<Rule groupRelation="and" name="technique_id=T1105,technique_name=Ingress Tool Transfer">
+				<TargetFilename condition="end with">:Zone.Identifier</TargetFilename>
+				<Image condition="contains any">\chrome.exe;\msedge.exe;\firefox.exe;\brave.exe;\OUTLOOK.EXE;\olk.exe;\thunderbird.exe;\ms-teams.exe;\Teams.exe;\WhatsApp.exe;\Signal.exe;\Telegram.exe</Image>
+			</Rule>
+			<!--Layer B: executable content marked as from the internet, by anyone (incl. extraction from ZIP/ISO)-->
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="contains any">.exe:Zone.Identifier;.dll:Zone.Identifier;.scr:Zone.Identifier;.cpl:Zone.Identifier;.com:Zone.Identifier;.pif:Zone.Identifier;.ps1:Zone.Identifier;.psm1:Zone.Identifier;.bat:Zone.Identifier;.cmd:Zone.Identifier;.vbs:Zone.Identifier;.vbe:Zone.Identifier;.js:Zone.Identifier;.jse:Zone.Identifier;.wsf:Zone.Identifier;.wsh:Zone.Identifier;.hta:Zone.Identifier;.sct:Zone.Identifier;.lnk:Zone.Identifier;.url:Zone.Identifier;.msi:Zone.Identifier;.msix:Zone.Identifier;.appx:Zone.Identifier;.appinstaller:Zone.Identifier;.iso:Zone.Identifier;.img:Zone.Identifier;.vhd:Zone.Identifier;.vhdx:Zone.Identifier;.one:Zone.Identifier;.msc:Zone.Identifier;.chm:Zone.Identifier;.jar:Zone.Identifier;.xll:Zone.Identifier;.docm:Zone.Identifier;.xlsm:Zone.Identifier;.pptm:Zone.Identifier</TargetFilename>
+			<TargetFilename name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="contains">Downloads</TargetFilename>
+			<TargetFilename name="technique_id=T1204.002,technique_name=Malicious File" condition="contains">Temp\7z</TargetFilename> <!--7-Zip extraction on double-click-->
+			<TargetFilename name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">Startup</TargetFilename>
+			<!--Layer C: payloads hidden inside an alternate data stream-->
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.bat</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.cmd</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.hta</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.jse</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.js</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.lnk</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.ps1</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.reg</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.sct</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.vbe</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.vbs</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.wsc</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.wsf</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.exe</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.dll</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.scr</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.cpl</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.doc</TargetFilename>
+			<TargetFilename name="technique_id=T1564.004,technique_name=NTFS File Attributes" condition="end with">.ppt</TargetFilename>
+		</FileCreateStreamHash>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileCreateStreamHash onmatch="exclude">
+			<TargetFilename condition="end with">:SmartScreen</TargetFilename> <!--Edge SmartScreen marker-->
+			<TargetFilename condition="end with">:com.dropbox.attrs</TargetFilename> <!--Dropbox metadata-->
+		</FileCreateStreamHash>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 16 : SYSMON CONFIGURATION CHANGE - cannot be filtered-->
+
+	<!--SYSMON EVENT ID 17 & 18 : PIPE CREATED / PIPE CONNECTED [PipeEvent]-->
+		<!--COMMENT:	Default pipe names of attacker tools (IOC-based) plus PowerShell hosted outside powershell.exe.-->
+	<RuleGroup name="" groupRelation="or">
+		<PipeEvent onmatch="include">
+			<!--Remote execution tools (PsExec and clones)-->
+			<PipeName name="technique_id=T1569.002,technique_name=Service Execution" condition="contains any">PSEXESVC;paexec;remcom;csexec</PipeName>
+			<PipeName name="technique_id=T1569.002,technique_name=Service Execution" condition="is">\svcctl</PipeName> <!--Remote service control (sc.exe / PsExec from another host)-->
+			<!--Credential dumpers-->
+			<PipeName name="technique_id=T1003,technique_name=OS Credential Dumping" condition="contains any">\lsadump;\cachedump;\wceservicepipe</PipeName>
+			<!--Known malware / C2 frameworks-->
+			<PipeName name="technique_id=T1559,technique_name=Inter-Process Communication" condition="contains any">\isapi_http;\isapi_dg;\isapi_dg2;\sdlrpc;\ahexec;\winsession;\lsassw;\46a676ab7f179e511e30dd2dc41bd388;\9f81f59bc58452127884ce513865ed20;\e710f28d59aa529d6792ca6ff0ca1b34;\rpchlp_3;\NamePipe_MoreWindows;\pcheap_reuse;\gruntsvc;\583da945-62af-10e8-4902-a8f205c72b2e;\bizkaz;\Posh;\jaccdpqnvbrrxlaf;\csexecsvc</PipeName>
+			<PipeName name="technique_id=T1559,technique_name=Inter-Process Communication" condition="contains any">\atctl;\userpipe;\iehelper;\comnap</PipeName>
+			<!--Cobalt Strike (defaults and common public profiles)-->
+			<PipeName name="technique_id=T1090.001,technique_name=Internal Proxy" condition="contains all">MSSE-;-server</PipeName>
+			<PipeName name="technique_id=T1090.001,technique_name=Internal Proxy" condition="begin with">\msagent_</PipeName>
+			<PipeName name="technique_id=T1090.001,technique_name=Internal Proxy" condition="begin with">\status_</PipeName>
+			<PipeName name="technique_id=T1090.001,technique_name=Internal Proxy" condition="begin with">\ntsvcs_</PipeName>
+			<PipeName name="technique_id=T1090.001,technique_name=Internal Proxy" condition="begin with">\scerpc_</PipeName>
+			<PipeName name="technique_id=T1090.001,technique_name=Internal Proxy" condition="begin with">\win_svc</PipeName>
+			<PipeName name="technique_id=T1055,technique_name=Process Injection" condition="begin with">\postex_</PipeName>
+			<!--PowerShell engine hosted outside PowerShell (unmanaged PowerShell, powerpick). wsmprovhost/sdiagnhost deliberately kept.-->
+			<Rule groupRelation="and" name="technique_id=T1059.001,technique_name=PowerShell">
+				<PipeName condition="begin with">\PSHost</PipeName>
+				<Image condition="excludes any">\powershell.exe;\pwsh.exe;\powershell_ise.exe</Image>
+			</Rule>
+		</PipeEvent>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 19 & 20 & 21 : WMI EVENT MONITORING [WmiEvent]-->
+		<!--COMMENT:	All permanent WMI subscriptions. CommandLineEventConsumer / ActiveScriptEventConsumer outside SCCM = alarm.-->
+	<RuleGroup name="" groupRelation="or">
+		<WmiEvent onmatch="include">
+			<EventType name="technique_id=T1546.003,technique_name=Windows Management Instrumentation Event Subscription" condition="begin with">Wmi</EventType> <!--Catch-all for tagging-->
+		</WmiEvent>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 22 : DNS QUERY [DnsQuery]-->
+		<!--COMMENT:	All queries except noise. Untagged: match QueryName against threat intel in ELK. Never exclude wpad or customer-content domains.-->
+	<RuleGroup name="" groupRelation="or">
+		<DnsQuery onmatch="exclude">
+			<!--Network noise-->
+			<QueryName condition="end with">.arpa.</QueryName> <!--Design decision to not log reverse DNS lookups. You will need to decide.-->
+			<QueryName condition="end with">.arpa</QueryName> <!--Design decision to not log reverse DNS lookups. You will need to decide.-->
+			<QueryName condition="end with">.msftncsi.com</QueryName> <!--Microsoft proxy detection | Microsoft default exclusion-->
+			<QueryName condition="is">..localmachine</QueryName>
+			<QueryName condition="is">localhost</QueryName>
+			<!--Microsoft-->
+			<QueryName condition="end with">-pushp.svc.ms</QueryName> <!--Microsoft: Doesn't appear to host customer content or subdomains-->
+			<QueryName condition="end with">.b-msedge.net</QueryName> <!--Microsoft: Doesn't appear to host customer content or subdomains-->
+			<QueryName condition="end with">.bing.com</QueryName> <!-- Microsoft | Microsoft default exclusion -->
+			<QueryName condition="end with">.hotmail.com</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.live.net</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.s-microsoft.com</QueryName> <!--Microsoft-->
+			<QueryName condition="end with">.microsoft.com</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.microsoftonline.com</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.microsoftstore.com</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.ms-acdc.office.com</QueryName> <!--Microsoft: Doesn't appear to host customer content or subdomains-->
+			<QueryName condition="end with">.msedge.net</QueryName> <!--Microsoft: Doesn't appear to host customer content or subdomains-->
+			<QueryName condition="end with">.msn.com</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.msocdn.com</QueryName> <!--Microsoft-->
+			<QueryName condition="end with">.skype.com</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.skype.net</QueryName> <!--Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.windows.com</QueryName> <!--Microsoft-->
+			<QueryName condition="end with">.windows.net.nsatc.net</QueryName> <!--Microsoft-->
+			<QueryName condition="end with">.windowsupdate.com</QueryName> <!--Microsoft-->
+			<QueryName condition="end with">.xboxlive.com</QueryName> <!--Microsoft-->
+			<QueryName condition="is">login.windows.net</QueryName> <!--Microsoft-->
+			<!--Microsoft:Office365/AzureAD-->
+			<QueryName condition="end with">.activedirectory.windowsazure.com</QueryName> <!--Microsoft: AzureAD-->
+			<QueryName condition="end with">.aria.microsoft.com</QueryName> <!--Microsoft: OneDrive/SharePoint-->
+			<QueryName condition="end with">.msauth.net</QueryName>
+			<QueryName condition="end with">.msftauth.net</QueryName>
+			<QueryName condition="end with">.office.net</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="end with">.opinsights.azure.com</QueryName> <!--Microsoft: AzureAD/InTune client event monitoring-->
+			<QueryName condition="end with">.res.office365.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="is">acdc-direct.office.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="is">atm-fp-direct.office.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="is">loki.delve.office.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="is">management.azure.com</QueryName> <!--Microsoft: AzureAD/InTune-->
+			<QueryName condition="is">messaging.office.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="is">outlook.office365.com</QueryName> <!--Microsoft: Protected by HSTS-->
+			<QueryName condition="is">portal.azure.com</QueryName> <!--Microsoft: AzureAD/InTune-->
+			<QueryName condition="is">protection.outlook.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="is">substrate.office.com</QueryName> <!--Microsoft: Office-->
+			<QueryName condition="end with">.measure.office.com</QueryName> <!--Microsoft: Office-->
+			<!--3rd-party applications-->
+			<QueryName condition="end with">.adobe.com</QueryName> <!--Adobe-->
+			<QueryName condition="end with">.adobe.io</QueryName> <!--Adobe-->
+			<QueryName condition="end with">.mozaws.net</QueryName> <!--Mozilla-->
+			<QueryName condition="end with">.mozilla.com</QueryName> <!--Mozilla-->
+			<QueryName condition="end with">.mozilla.net</QueryName> <!--Mozilla-->
+			<QueryName condition="end with">.mozilla.org</QueryName> <!--Mozilla-->
+			<QueryName condition="end with">.spotify.com</QueryName> <!--Spotify-->
+			<QueryName condition="end with">.spotify.map.fastly.net</QueryName> <!--Spotify-->
+			<QueryName condition="end with">.wbx2.com</QueryName> <!--Webex-->
+			<QueryName condition="end with">.webex.com</QueryName> <!--Webex-->
+			<QueryName condition="is">clients1.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">clients2.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">clients3.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">clients4.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">clients5.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">clients6.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">safebrowsing.googleapis.com</QueryName> <!--Google-->
+			<!--Goodlist CDN-->
+			<QueryName condition="end with">.akadns.net</QueryName> <!--AkamaiCDN, extensively used by Microsoft | Microsoft default exclusion-->
+			<QueryName condition="end with">.netflix.com</QueryName>
+			<QueryName condition="end with">aspnetcdn.com</QueryName> <!--Microsoft [ https://docs.microsoft.com/en-us/aspnet/ajax/cdn/overview ]-->
+			<QueryName condition="is">ajax.googleapis.com</QueryName>
+			<QueryName condition="is">cdnjs.cloudflare.com</QueryName> <!--Cloudflare: Hosts popular javascript libraries-->
+			<QueryName condition="is">fonts.googleapis.com</QueryName> <!--Google fonts-->
+			<QueryName condition="end with">.typekit.net</QueryName> <!--Adobe fonts-->
+			<QueryName condition="end with">.stackassets.com</QueryName> <!--Stack Overflow-->
+			<QueryName condition="end with">.steamcontent.com</QueryName>
+			<QueryName condition="is">play.google.com</QueryName>
+			<QueryName condition="is">content-autofill.googleapis.com</QueryName>
+			<!--Web resources-->
+			<QueryName condition="end with">.disqus.com</QueryName> <!--Microsoft default exclusion-->
+			<QueryName condition="end with">.fontawesome.com</QueryName>
+			<QueryName condition="is">disqus.com</QueryName> <!--Microsoft default exclusion-->
+			<!--Ads-->
+			<QueryName condition="end with">.1rx.io</QueryName> <!--Ads-->
+			<QueryName condition="end with">.2mdn.net</QueryName> <!--Ads: Google | Microsoft default exclusion-->
+			<QueryName condition="end with">.3lift.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.adadvisor.net</QueryName> <!--Ads: Neustar [ https://better.fyi/trackers/adadvisor.net/ ] -->
+			<QueryName condition="end with">.adap.tv</QueryName> <!--Ads:AOL | Microsoft default exclusion [ https://www.crunchbase.com/organization/adap-tv ] -->
+			<QueryName condition="end with">.addthis.com</QueryName> <!--Ads:Oracle | Microsoft default exclusion [ https://en.wikipedia.org/wiki/AddThis ] -->
+			<QueryName condition="end with">.adform.net</QueryName> <!--Ads-->
+			<QueryName condition="end with">.adnxs.com</QueryName> <!--Ads: AppNexus | Microsoft default exclusion-->
+			<QueryName condition="end with">.adroll.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.adrta.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.adsafeprotected.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.adsrvr.org</QueryName> <!--Ads-->
+			<QueryName condition="end with">.adsymptotic.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.advertising.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.agkn.com</QueryName> <!--Ads | [ https://www.home.neustar/privacy ] -->
+			<QueryName condition="end with">.amazon-adsystem.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.analytics.yahoo.com</QueryName> <!--Ads:Yahoo-->
+			<QueryName condition="end with">.aol.com</QueryName> <!--Ads | Microsoft default exclusion -->
+			<QueryName condition="end with">.betrad.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.bidswitch.net</QueryName> <!--Ads-->
+			<QueryName condition="end with">.casalemedia.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.chartbeat.net</QueryName> <!--Ads | Microsoft default exclusion [ https://better.fyi/trackers/chartbeat.com/ ]-->
+			<QueryName condition="end with">.cnn.com</QueryName> <!-- Microsoft default exclusion-->
+			<QueryName condition="end with">.convertro.com</QueryName> <!--Ads:Verizon-->
+			<QueryName condition="end with">.criteo.com</QueryName> <!--Ads [ https://better.fyi/trackers/criteo.com/ ] -->
+			<QueryName condition="end with">.criteo.net</QueryName> <!--Ads [ https://better.fyi/trackers/criteo.com/ ] -->
+			<QueryName condition="end with">.crwdcntrl.net</QueryName> <!--Ads: Lotame [ https://better.fyi/trackers/crwdcntrl.net/ ] -->
+			<QueryName condition="end with">.demdex.net</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.domdex.com</QueryName>
+			<QueryName condition="end with">.dotomi.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.doubleclick.net</QueryName> <!--Ads:Conversant | Microsoft default exclusion [ https://www.crunchbase.com/organization/dotomi ] -->
+			<QueryName condition="end with">.doubleverify.com</QueryName> <!--Ads: Google-->
+			<QueryName condition="end with">.emxdgt.com</QueryName> <!--Ads: EMX-->
+			<QueryName condition="end with">.everesttech.net</QueryName> <!--Ads | [ https://better.fyi/trackers/everesttech.net/ ] -->
+			<QueryName condition="end with">.exelator.com</QueryName> <!--Ads:Nielson Marketing Cloud-->
+			<QueryName condition="end with">.google-analytics.com</QueryName> <!--Ads:Google | Microsoft default exclusion-->
+			<QueryName condition="end with">.googleadservices.com</QueryName> <!--Google-->
+			<QueryName condition="end with">.googlesyndication.com</QueryName> <!--Ads:Google, sometimes called during malicious ads, but not directly responsible | Microsoft default exclusion [ https://www.hackread.com/wp-content/uploads/2018/06/Bitdefender-Whitepaper-Zacinlo.pdf ]-->
+			<QueryName condition="end with">.googletagmanager.com</QueryName> <!--Google-->
+			<QueryName condition="end with">.googlevideo.com</QueryName> <!--Google | Microsoft default exclusion-->
+			<QueryName condition="end with">.gstatic.com</QueryName> <!--Google | Microsoft default exclusion-->
+			<QueryName condition="end with">.gvt1.com</QueryName> <!--Google-->
+			<QueryName condition="end with">.gvt2.com</QueryName> <!--Google-->
+			<QueryName condition="end with">.ib-ibi.com</QueryName> <!--Ads: Offerpath [ https://better.fyi/trackers/ib-ibi.com/ ] -->
+			<QueryName condition="end with">.jivox.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.krxd.net</QueryName> <!--Ads-->
+			<QueryName condition="end with">.lijit.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.mathtag.com</QueryName> <!--Microsoft default exclusion-->
+			<QueryName condition="end with">.moatads.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.moatpixel.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.mookie1.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.myvisualiq.net</QueryName> <!--Ads-->
+			<QueryName condition="end with">.netmng.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.nexac.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.openx.net</QueryName> <!--Ads-->
+			<QueryName condition="end with">.optimizely.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.outbrain.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.pardot.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.phx.gbl</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.pinterest.com</QueryName> <!--Pinerest-->
+			<QueryName condition="end with">.pubmatic.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.quantcount.com</QueryName>
+			<QueryName condition="end with">.quantserve.com</QueryName>
+			<QueryName condition="end with">.revsci.net</QueryName> <!--Ads:Omniture | Microsoft default exclusion-->
+			<QueryName condition="end with">.rfihub.net</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.rlcdn.com</QueryName> <!--Ads: Rapleaf [ https://better.fyi/trackers/rlcdn.com/ ] -->
+			<QueryName condition="end with">.rubiconproject.com</QueryName> <!--Ads: Rubicon Project | Microsoft default exclusion [ https://better.fyi/trackers/rubiconproject.com/ ] -->
+			<QueryName condition="end with">.scdn.co</QueryName> <!--Spotify-->
+			<QueryName condition="end with">.scorecardresearch.com</QueryName> <!--Ads: Comscore | Microsoft default exclusion-->
+			<QueryName condition="end with">.serving-sys.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.sharethrough.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.simpli.fi</QueryName>
+			<QueryName condition="end with">.sitescout.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.smartadserver.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.snapads.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.spotxchange.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.taboola.com</QueryName> <!--Ads:Taboola-->
+			<QueryName condition="end with">.taboola.map.fastly.net</QueryName> <!--Ads:Taboola-->
+			<QueryName condition="end with">.tapad.com</QueryName>
+			<QueryName condition="end with">.tidaltv.com</QueryName> <!--Ads: Videology [ https://better.fyi/trackers/tidaltv.com/ ] -->
+			<QueryName condition="end with">.tremorhub.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.tribalfusion.com</QueryName> <!--Ads: Exponential [ https://better.fyi/trackers/tribalfusion.com/ ] -->
+			<QueryName condition="end with">.turn.com</QueryName> <!--Ads | Microsoft default exclusion [ https://better.fyi/trackers/turn.com/ ] -->
+			<QueryName condition="end with">.twimg.com</QueryName> <!--Ads | Microsoft default exclusion-->
+			<QueryName condition="end with">.tynt.com</QueryName> <!--Ads-->
+			<QueryName condition="end with">.w55c.net</QueryName> <!--Ads:dataxu-->
+			<QueryName condition="end with">.ytimg.com</QueryName> <!--Google-->
+			<QueryName condition="end with">.zorosrv.com</QueryName> <!--Ads:Taboola-->
+			<QueryName condition="is">1rx.io</QueryName> <!--Ads-->
+			<QueryName condition="is">adservice.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">ampcid.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">clientservices.googleapis.com</QueryName> <!--Google-->
+			<QueryName condition="is">googleadapis.l.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">imasdk.googleapis.com</QueryName> <!--Google [ https://developers.google.com/interactive-media-ads/docs/sdks/html5/ ] -->
+			<QueryName condition="is">l.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">ml314.com</QueryName> <!--Ads-->
+			<QueryName condition="is">mtalk.google.com</QueryName> <!--Google-->
+			<QueryName condition="is">update.googleapis.com</QueryName> <!--Google-->
+			<QueryName condition="is">www.googletagservices.com</QueryName> <!--Google-->
+			<!--SocialNet-->
+			<QueryName condition="end with">.pscp.tv</QueryName> <!--Twitter:Periscope-->
+			<!--OSCP/CRL Common-->
+			<QueryName condition="end with">.amazontrust.com</QueryName>
+			<QueryName condition="end with">.digicert.com</QueryName>
+			<QueryName condition="end with">.globalsign.com</QueryName>
+			<QueryName condition="end with">.globalsign.net</QueryName>
+			<QueryName condition="end with">.intel.com</QueryName>
+			<QueryName condition="end with">.symcb.com</QueryName> <!--Digicert-->
+			<QueryName condition="end with">.symcd.com</QueryName> <!--Digicert-->
+			<QueryName condition="end with">.thawte.com</QueryName>
+			<QueryName condition="end with">.usertrust.com</QueryName>
+			<QueryName condition="end with">.verisign.com</QueryName>
+			<QueryName condition="end with">ocsp.identrust.com</QueryName>
+			<QueryName condition="end with">pki.goog</QueryName>
+			<QueryName condition="is">msocsp.com</QueryName> <!--Microsoft:OCSP-->
+			<QueryName condition="is">ocsp.comodoca.com</QueryName>
+			<QueryName condition="is">ocsp.entrust.net</QueryName>
+			<QueryName condition="is">ocsp.godaddy.com</QueryName>
+			<QueryName condition="is">ocsp.msocsp.com</QueryName> <!--Microsoft:OCSP-->
+			<QueryName condition="end with">amazontrust.com</QueryName>
+			<QueryName condition="is">ocsp.sectigo.com</QueryName>
+			<QueryName condition="is">pki-goog.l.google.com</QueryName>
+			<QueryName condition="is">ocsp.verisign.com</QueryName>
+			<QueryName condition="is">status.rapidssl.com</QueryName>
+			<QueryName condition="is">status.thawte.com</QueryName>
+			<!--SECTION: Narrowed replacements-->
+			<QueryName condition="is">login.live.com</QueryName>
+			<QueryName condition="is">outlook.live.com</QueryName>
+			<QueryName condition="is">account.live.com</QueryName>
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</Image>
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\NisSrv.exe</Image>
+			<QueryName condition="end with">.lencr.org</QueryName> <!--Let's Encrypt CRL-->
+			<!--SECTION: Modern Microsoft / vendor noise-->
+			<QueryName condition="end with">.cloud.microsoft</QueryName>
+			<QueryName condition="end with">.static.microsoft</QueryName>
+			<QueryName condition="end with">.office.com</QueryName>
+			<QueryName condition="end with">.msftconnecttest.com</QueryName>
+			<QueryName condition="end with">.apple.com</QueryName>
+			<QueryName condition="end with">.mzstatic.com</QueryName>
+			<QueryName condition="end with">.zoom.us</QueryName>
+			<QueryName condition="end with">.slack-edge.com</QueryName>
+			<QueryName condition="end with">.brave.com</QueryName>
+			<QueryName condition="end with">.bravesoftware.com</QueryName>
+			<QueryName condition="end with">.firefox.com</QueryName>
+			<QueryName condition="is">update.code.visualstudio.com</QueryName>
+		</DnsQuery>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 23 : FILE DELETE ARCHIVED [FileDelete]-->
+		<!--COMMENT:	OFF: archiving deleted files costs disk space and creates a target.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileDelete onmatch="include"/>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 24 : CLIPBOARD CHANGE [ClipboardChange]-->
+		<!--COMMENT:	OFF: would store clipboard contents (passwords, personal data) - GDPR.-->
+	<RuleGroup name="" groupRelation="or">
+		<ClipboardChange onmatch="include"/>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 25 : PROCESS TAMPERING [ProcessTampering]-->
+		<!--COMMENT:	Process hollowing / herpaderping / ghosting (T1055.012). Self-updating programs excluded.-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessTampering onmatch="include">
+			<Type name="technique_id=T1055.012,technique_name=Process Hollowing" condition="begin with">Image</Type> <!--Catch-all: "Image is replaced" / "Image is locked for access"-->
+		</ProcessTampering>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<ProcessTampering onmatch="exclude">
+			<Image condition="is">C:\Program Files\Mozilla Firefox\firefox.exe</Image>
+			<Image condition="is">C:\Program Files\Mozilla Firefox\updater.exe</Image>
+			<Image condition="is">C:\Program Files\Mozilla Firefox\default-browser-agent.exe</Image>
+			<Image condition="is">C:\Program Files\Mozilla Firefox\pingsender.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\firefox.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\updater.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\default-browser-agent.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\pingsender.exe</Image>
+			<Image condition="is">C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</Image>
+			<Image condition="is">C:\Program Files\Microsoft\Edge\Application\msedge.exe</Image>
+			<Image condition="is">C:\Program Files\Microsoft VS Code\Code.exe</Image>
+			<Image condition="end with">\AppData\Local\Programs\Microsoft VS Code\Code.exe</Image>
+			<Image condition="is">C:\Program Files\Git\cmd\git.exe</Image>
+			<Image condition="is">C:\Program Files\Git\mingw64\bin\git.exe</Image>
+			<Image condition="is">C:\Program Files\Git\mingw64\libexec\git-core\git.exe</Image>
+			<Image condition="is">C:\Windows\System32\wbem\WMIADAP.exe</Image>
+		</ProcessTampering>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 26 : FILE DELETE LOGGED [FileDeleteDetected]-->
+		<!--COMMENT:	Narrow, no archiving: backups destroyed (T1490), event log files deleted (T1685.005), tools cleaned up (T1070.004).-->
+	<RuleGroup name="" groupRelation="or">
+		<FileDeleteDetected onmatch="include">
+			<!--Backups destroyed before encryption-->
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="end with">.vbk</TargetFilename> <!--Veeam full backup-->
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="end with">.vib</TargetFilename> <!--Veeam incremental-->
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="end with">.vbm</TargetFilename> <!--Veeam metadata-->
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="contains">\WindowsImageBackup\</TargetFilename>
+			<!--Event log files deleted-->
+			<Rule groupRelation="and" name="technique_id=T1685.005,technique_name=Clear Windows Event Logs">
+				<TargetFilename condition="begin with">C:\Windows\System32\winevt\Logs\</TargetFilename>
+				<TargetFilename condition="end with">.evtx</TargetFilename>
+			</Rule>
+			<!--Attacker tool cleanup from staging folders-->
+			<Rule groupRelation="and" name="technique_id=T1070.004,technique_name=File Deletion">
+				<TargetFilename condition="begin with">C:\Users\Public\</TargetFilename>
+				<TargetFilename condition="contains any">.exe;.dll;.ps1;.bat;.cmd;.vbs;.js;.hta;.scr</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1070.004,technique_name=File Deletion">
+				<TargetFilename condition="begin with">C:\Windows\Temp\</TargetFilename>
+				<TargetFilename condition="contains any">.exe;.dll;.ps1;.bat;.cmd;.vbs;.js;.hta;.scr</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1070.004,technique_name=File Deletion">
+				<TargetFilename condition="begin with">C:\PerfLogs\</TargetFilename>
+				<TargetFilename condition="contains any">.exe;.dll;.ps1;.bat;.cmd;.vbs;.js;.hta;.scr</TargetFilename>
+			</Rule>
+		</FileDeleteDetected>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileDeleteDetected onmatch="exclude">
+			<!--Windows installers and servicing clean up C:\Windows\Temp-->
+			<Image condition="is">C:\Windows\System32\msiexec.exe</Image>
+			<Image condition="is">C:\Windows\SysWOW64\msiexec.exe</Image>
+			<Image condition="is">C:\Windows\servicing\TrustedInstaller.exe</Image>
+			<Image condition="begin with">C:\Windows\WinSxS\</Image>
+			<Image condition="is">C:\Windows\System32\MpSigStub.exe</Image>
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</Image>
+		</FileDeleteDetected>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 27 : FILE BLOCK EXECUTABLE [FileBlockExecutable]-->
+		<!--COMMENT:	BLOCKING: Office apps and script hosts may not write PE files (detected by content, not extension). Test before rollout.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileBlockExecutable onmatch="include">
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">WINWORD.EXE</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">EXCEL.EXE</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">POWERPNT.EXE</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">OUTLOOK.EXE</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">olk.exe</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">ONENOTE.EXE</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">MSACCESS.EXE</Image>
+			<Image name="technique_id=T1204.002,technique_name=Malicious File" condition="image">MSPUB.EXE</Image>
+			<Image name="technique_id=T1059.005,technique_name=Visual Basic" condition="image">wscript.exe</Image>
+			<Image name="technique_id=T1059.005,technique_name=Visual Basic" condition="image">cscript.exe</Image>
+			<Image name="technique_id=T1218.005,technique_name=Mshta" condition="image">mshta.exe</Image>
+		</FileBlockExecutable>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 28 : FILE BLOCK SHREDDING [FileBlockShredding]-->
+		<!--COMMENT:	BLOCKING: secure-delete / shredding (sdelete, wipers). Exclude legitimate tools per customer.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileBlockShredding onmatch="include">
+			<Image name="technique_id=T1070.004,technique_name=File Deletion" condition="contains">\</Image> <!--Catch-all-->
+		</FileBlockShredding>
+	</RuleGroup>
+	<!--FileBlockShredding exclude: add legitimate secure-delete / backup tools per customer as <FileBlockShredding onmatch="exclude"> rules-->
+
+	<!--SYSMON EVENT ID 29 : FILE EXECUTABLE DETECTED [FileExecutableDetected]-->
+		<!--COMMENT:	Every new PE file (by content) with hash, renamed or not. Trusted updaters excluded.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileExecutableDetected onmatch="include">
+			<TargetFilename name="technique_id=T1105,technique_name=Ingress Tool Transfer" condition="contains">\</TargetFilename> <!--Catch-all-->
+		</FileExecutableDetected>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileExecutableDetected onmatch="exclude">
+			<!--SECTION: Windows servicing / Windows Update-->
+			<Image condition="is">C:\Windows\servicing\TrustedInstaller.exe</Image>
+			<Image condition="begin with">C:\Windows\WinSxS\</Image> <!--TiWorker.exe-->
+			<Image condition="is">C:\Windows\System32\MpSigStub.exe</Image> <!--Defender update stub-->
+			<Image condition="contains all">C:\ProgramData\Microsoft\Windows Defender\Platform\;\MsMpEng.exe</Image>
+			<!--SECTION: Office Click-to-Run-->
+			<Image condition="is">C:\Program Files\Common Files\microsoft shared\ClickToRun\OfficeClickToRun.exe</Image>
+			<Image condition="is">C:\Program Files\Common Files\Microsoft Shared\ClickToRun\OfficeC2RClient.exe</Image>
+			<!--SECTION: Browser updaters (machine-wide)-->
+			<Image condition="begin with">C:\Program Files (x86)\Microsoft\EdgeUpdate\</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Microsoft\Edge\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files\Microsoft\Edge\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Microsoft\EdgeWebView\Application\;\Installer\setup.exe</Image>
+			<Image condition="begin with">C:\Program Files (x86)\Google\GoogleUpdater\</Image>
+			<Image condition="begin with">C:\Program Files (x86)\Google\Update\</Image>
+			<Image condition="contains all">C:\Program Files\Google\Chrome\Application\;\Installer\setup.exe</Image>
+			<Image condition="contains all">C:\Program Files (x86)\Google\Chrome\Application\;\Installer\setup.exe</Image>
+			<Image condition="begin with">C:\Program Files (x86)\BraveSoftware\Update\</Image>
+			<Image condition="contains all">C:\Program Files\BraveSoftware\Brave-Browser\Application\;\Installer\setup.exe</Image>
+			<Image condition="is">C:\Program Files\Mozilla Firefox\updater.exe</Image>
+			<Image condition="is">C:\Program Files\Firefox Developer Edition\updater.exe</Image>
+			<Image condition="is">C:\Program Files (x86)\Mozilla Maintenance Service\maintenanceservice.exe</Image>
+			<!--SECTION: OneDrive (per-user install, exact paths)-->
+			<Image condition="is">C:\Program Files\Microsoft OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDrive.exe</Image>
+			<Image condition="end with">\AppData\Local\Microsoft\OneDrive\OneDriveStandaloneUpdater.exe</Image>
+			<Image condition="contains all">\AppData\Local\Microsoft\OneDrive\;\OneDriveSetup.exe</Image>
+			<!--SECTION: Servicing / package stores (TargetFilename)-->
+			<TargetFilename condition="begin with">C:\Windows\SoftwareDistribution\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Windows\WinSxS\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Program Files\WindowsApps\</TargetFilename> <!--Store apps, new Teams-->
+			<TargetFilename condition="begin with">C:\Windows\assembly\</TargetFilename> <!--.NET native images-->
+			<TargetFilename condition="begin with">C:\ProgramData\Microsoft\Windows Defender\Definition Updates\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Windows\System32\DriverStore\Temp\</TargetFilename>
+			<TargetFilename condition="begin with">C:\Windows\Installer\</TargetFilename>
+			<TargetFilename condition="begin with">C:\$WINDOWS.~BT\Sources\</TargetFilename> <!--Feature updates-->
+		</FileExecutableDetected>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 255 : ERROR - cannot be filtered-->
+	</EventFiltering>
+</Sysmon>

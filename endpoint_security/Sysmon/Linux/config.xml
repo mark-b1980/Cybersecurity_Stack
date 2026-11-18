@@ -1,0 +1,732 @@
+<!--
+  Sysmon for Linux baseline config | Incident-response focused, low noise, MITRE ATT&CK v20.1 tagged
+  Version:	1.0 | Date: 2026-11-18
+  Target:	Sysmon for Linux 1.6.0+ | schemaversion 4.90
+		Debian / Ubuntu / Linux Mint / Kali / Parrot and RHEL / Rocky / Alma / Oracle / Fedora (merged /usr)
+
+  Same philosophy as the Windows baseline (sysmon-baseline.xml): log what matters for an investigation,
+  exclude noise with exact paths, tag rules with MITRE ATT&CK (RuleName: technique_id=...,technique_name=...).
+
+  EVENTS IMPLEMENTED BY SYSMON FOR LINUX
+	  1 ProcessCreate	ON  all, noise excluded, untagged (MITRE mapping in ELK)
+	  3 NetworkConnect	ON  shells/interpreters/tools connecting, staging paths, suspicious ports (outbound only)
+	  5 ProcessTerminate	ON  staging paths, security/logging agents ending
+	  9 RawAccessRead	OFF (fsck/blkid/LVM/udisks noise)
+	 10 ProcessAccess	ON  every ptrace attach (rare on Linux), debuggers kept
+	 11 FileCreate		ON  persistence locations, accounts, sudo, PAM, linker, modules, webshells
+	 23 FileDelete		ON  narrow: logs, shell history, audit config, staging tools, backups (no archiving)
+	100 eBPFEvent		ON  eBPF programs loaded (rootkits), systemd/container runtimes/Sysmon excluded
+  Not available on Linux: registry, DNS, pipes, WMI, ADS, tampering, block events, hashes.
+
+  TECHNICAL:
+  - The "image" condition only splits on "\" and does not work on Linux. Binaries are matched with "end with /name".
+  - Conditions are case-insensitive. Exclude always wins over include.
+  - Output goes to syslog/journald. Raise the rsyslog message size ($MaxMessageSize 64k) - FieldSizes below caps long fields.
+-->
+
+<Sysmon schemaversion="4.90">
+	<!--SYSMON META CONFIG-->
+	<FieldSizes>CommandLine:4096,ParentCommandLine:4096,Image:1024,ParentImage:1024,CurrentDirectory:512,TargetFilename:1024</FieldSizes> <!--Cap field length so syslog does not truncate events-->
+	<DnsLookup>False</DnsLookup> <!--No reverse lookups for NetworkConnect-->
+
+	<EventFiltering>
+
+	<!--SYSMON EVENT ID 1 : PROCESS CREATION [ProcessCreate]-->
+		<!--COMMENT:	All processes are logged except high-frequency noise below. Untagged: MITRE mapping is done in ELK.-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessCreate onmatch="exclude">
+			<!--SECTION: systemd helpers (very frequent, root-owned)-->
+			<Image condition="end with">/systemd/systemd-userwork</Image> <!--systemd-userdbd worker, spawned constantly-->
+			<Image condition="end with">/systemd/systemd-user-runtime-dir</Image>
+			<!--SECTION: Login banner scripts (Ubuntu/Debian motd on every SSH login) - new scripts there are caught by #11-->
+			<ParentCommandLine condition="contains">/etc/update-motd.d</ParentCommandLine>
+			<Image condition="end with">/update-notifier/update-motd-updates-available</Image>
+			<Image condition="end with">/update-notifier/apt-check</Image>
+			<!--SECTION: NetworkManager dispatcher (laptops) - new scripts there are caught by #11-->
+			<ParentImage condition="end with">/nm-dispatcher</ParentImage>
+			<!--SECTION: sysstat / php session cleanup cron jobs (every 10-30 min)-->
+			<CommandLine condition="contains">/sysstat/debian-sa1</CommandLine>
+			<CommandLine condition="contains">/sa/sa1 </CommandLine>
+			<CommandLine condition="end with">/sa/sa1</CommandLine>
+			<CommandLine condition="contains">/usr/lib/php/sessionclean</CommandLine>
+			<!--SECTION: SSH pre-authentication helpers (internet-facing servers: brute force noise). Post-login shells stay logged.-->
+			<Image condition="end with">/sshd-auth</Image> <!--OpenSSH 10+ pre-auth-->
+			<CommandLine condition="end with"> [net]</CommandLine> <!--OpenSSH pre-auth privsep child-->
+			<CommandLine condition="end with"> [preauth]</CommandLine>
+			<!--SECTION: Container runtime internals (healthcheck commands and container processes stay logged)-->
+			<CommandLine condition="is">runc init</CommandLine>
+			<CommandLine condition="is">crun init</CommandLine>
+			<!--SECTION: Monitoring agents running their periodic checks (root-owned install paths)-->
+			<ParentImage condition="end with">/zabbix_agentd</ParentImage>
+			<ParentImage condition="end with">/zabbix_agent2</ParentImage>
+			<ParentCommandLine condition="contains">/usr/bin/check_mk_agent</ParentCommandLine>
+			<ParentImage condition="end with">/sbin/nrpe</ParentImage>
+			<ParentImage condition="end with">/bin/telegraf</ParentImage>
+			<ParentImage condition="begin with">/var/ossec/bin/</ParentImage> <!--Wazuh agent commands (netstat, df, last ...)-->
+			<ParentImage condition="begin with">/usr/libexec/netdata/</ParentImage>
+			<ParentImage condition="begin with">/opt/netdata/</ParentImage>
+			<!--SECTION: Browser / Electron child processes (renderer, GPU, utility) - main process stays logged-->
+			<Rule groupRelation="and">
+				<Image condition="begin with">/opt/google/chrome/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/opt/brave.com/brave/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/opt/microsoft/msedge/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/usr/lib/chromium/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/usr/lib64/chromium-browser/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/snap/chromium/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/usr/share/code/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/opt/visual-studio-code/</Image>
+				<CommandLine condition="contains"> --type=</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/usr/lib/firefox/</Image>
+				<CommandLine condition="contains"> -contentproc</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/usr/lib64/firefox/</Image>
+				<CommandLine condition="contains"> -contentproc</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/usr/lib/firefox-esr/</Image>
+				<CommandLine condition="contains"> -contentproc</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/snap/firefox/</Image>
+				<CommandLine condition="contains"> -contentproc</CommandLine>
+			</Rule>
+			<Rule groupRelation="and">
+				<Image condition="begin with">/opt/firefox/</Image>
+				<CommandLine condition="contains"> -contentproc</CommandLine>
+			</Rule>
+		</ProcessCreate>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 3 : NETWORK CONNECTION [NetworkConnect]-->
+		<!--COMMENT:	Targeted and outbound only (Initiated=true): shells/interpreters, attacker tools, staging paths, suspicious ports. Inbound brute force is not logged here.-->
+	<RuleGroup name="" groupRelation="or">
+		<NetworkConnect onmatch="include">
+			<!--Execution from staging locations or memory-->
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--World-writable temp-->
+				<Image condition="begin with">/tmp/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--World-writable temp, survives reboot-->
+				<Image condition="begin with">/var/tmp/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--RAM disk - classic malware staging-->
+				<Image condition="begin with">/dev/shm/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol">
+				<Image condition="begin with">/run/shm/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--Fileless execution from memory (memfd_create)-->
+				<Image condition="begin with">/memfd:</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1620,technique_name=Reflective Code Loading"> <!--Binary deleted after start-->
+				<Image condition="end with"> (deleted)</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--User-owned binaries (like C:\Users on Windows)-->
+				<Image condition="begin with">/home/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol">
+				<Image condition="begin with">/root/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1505.003,technique_name=Web Shell"> <!--Binary in webroot-->
+				<Image condition="begin with">/var/www/</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Interpreters (resolved real paths carry version suffixes, e.g. /usr/bin/python3.12, /usr/bin/php8.2)-->
+			<Rule groupRelation="and" name="technique_id=T1059.006,technique_name=Python">
+				<Image condition="begin with">/usr/bin/python</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.006,technique_name=Python">
+				<Image condition="begin with">/usr/local/bin/python</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.006,technique_name=Python">
+				<Image condition="begin with">/usr/libexec/platform-python</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059,technique_name=Command and Scripting Interpreter">
+				<Image condition="begin with">/usr/bin/perl</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059,technique_name=Command and Scripting Interpreter">
+				<Image condition="begin with">/usr/bin/ruby</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059,technique_name=Command and Scripting Interpreter">
+				<Image condition="begin with">/usr/bin/php</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059,technique_name=Command and Scripting Interpreter">
+				<Image condition="begin with">/usr/bin/lua</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Shells (reverse shells via /dev/tcp)-->
+			<Rule groupRelation="and" name="technique_id=T1059.004,technique_name=Unix Shell">
+				<Image condition="end with">/bash</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.004,technique_name=Unix Shell">
+				<Image condition="end with">/sh</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.004,technique_name=Unix Shell">
+				<Image condition="end with">/dash</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.004,technique_name=Unix Shell">
+				<Image condition="end with">/zsh</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.004,technique_name=Unix Shell">
+				<Image condition="end with">/ksh</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1059.004,technique_name=Unix Shell">
+				<Image condition="end with">/busybox</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Raw socket tools-->
+			<Rule groupRelation="and" name="technique_id=T1095,technique_name=Non-Application Layer Protocol">
+				<Image condition="end with">/nc</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1095,technique_name=Non-Application Layer Protocol">
+				<Image condition="end with">/ncat</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1095,technique_name=Non-Application Layer Protocol">
+				<Image condition="end with">/netcat</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1095,technique_name=Non-Application Layer Protocol">
+				<Image condition="end with">/nc.openbsd</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1095,technique_name=Non-Application Layer Protocol">
+				<Image condition="end with">/nc.traditional</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1095,technique_name=Non-Application Layer Protocol">
+				<Image condition="end with">/socat</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021,technique_name=Remote Services">
+				<Image condition="end with">/telnet</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1573,technique_name=Encrypted Channel">
+				<Image condition="end with">/openssl</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Download tools-->
+			<Rule groupRelation="and" name="technique_id=T1105,technique_name=Ingress Tool Transfer">
+				<Image condition="end with">/curl</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1105,technique_name=Ingress Tool Transfer">
+				<Image condition="end with">/wget</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1105,technique_name=Ingress Tool Transfer">
+				<Image condition="end with">/tftp</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1105,technique_name=Ingress Tool Transfer">
+				<Image condition="end with">/ftp</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Remote access / lateral movement-->
+			<Rule groupRelation="and" name="technique_id=T1021.004,technique_name=SSH">
+				<Image condition="end with">/ssh</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.004,technique_name=SSH">
+				<Image condition="end with">/scp</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.004,technique_name=SSH">
+				<Image condition="end with">/sftp</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.002,technique_name=SMB/Windows Admin Shares">
+				<Image condition="end with">/smbclient</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.001,technique_name=Remote Desktop Protocol">
+				<Image condition="end with">/xfreerdp</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.001,technique_name=Remote Desktop Protocol">
+				<Image condition="end with">/rdesktop</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Scanners / brute force-->
+			<Rule groupRelation="and" name="technique_id=T1046,technique_name=Network Service Discovery">
+				<Image condition="end with">/nmap</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1046,technique_name=Network Service Discovery">
+				<Image condition="end with">/masscan</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1046,technique_name=Network Service Discovery">
+				<Image condition="end with">/zmap</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1110,technique_name=Brute Force">
+				<Image condition="end with">/hydra</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Tunnels / proxies-->
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/ngrok</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/cloudflared</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/chisel</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/frpc</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/gost</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/ligolo-agent</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1572,technique_name=Protocol Tunneling">
+				<Image condition="end with">/sshuttle</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090.003,technique_name=Multi-hop Proxy">
+				<Image condition="end with">/tor</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Exfiltration-->
+			<Rule groupRelation="and" name="technique_id=T1567.002,technique_name=Exfiltration to Cloud Storage">
+				<Image condition="end with">/rclone</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1567.002,technique_name=Exfiltration to Cloud Storage">
+				<Image condition="end with">/mega-cmd-server</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Remote access tools-->
+			<Rule groupRelation="and" name="technique_id=T1219,technique_name=Remote Access Tools">
+				<Image condition="end with">/anydesk</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1219,technique_name=Remote Access Tools">
+				<Image condition="end with">/teamviewerd</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1219,technique_name=Remote Access Tools">
+				<Image condition="end with">/rustdesk</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Crypto miners-->
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking">
+				<Image condition="end with">/xmrig</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking">
+				<Image condition="end with">/minerd</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking">
+				<Image condition="end with">/cpuminer</Image>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<!--Suspicious destination ports (outbound only)-->
+			<Rule groupRelation="and" name="technique_id=T1021.004,technique_name=SSH"> <!--SSH-->
+				<DestinationPort condition="is">22</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021,technique_name=Remote Services"> <!--Telnet-->
+				<DestinationPort condition="is">23</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071.003,technique_name=Mail Protocols"> <!--SMTP-->
+				<DestinationPort condition="is">25</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.002,technique_name=SMB/Windows Admin Shares"> <!--MS-RPC (Impacket wmiexec/dcomexec)-->
+				<DestinationPort condition="is">135</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.002,technique_name=SMB/Windows Admin Shares"> <!--SMB (Impacket from Linux)-->
+				<DestinationPort condition="is">445</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.001,technique_name=Remote Desktop Protocol"> <!--RDP-->
+				<DestinationPort condition="is">3389</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.005,technique_name=VNC"> <!--VNC-->
+				<DestinationPort condition="is">5900</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.006,technique_name=Windows Remote Management"> <!--WinRM (evil-winrm)-->
+				<DestinationPort condition="is">5985</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1021.006,technique_name=Windows Remote Management"> <!--WinRM-->
+				<DestinationPort condition="is">5986</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1571,technique_name=Non-Standard Port"> <!--Metasploit-->
+				<DestinationPort condition="is">4444</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090,technique_name=Proxy"> <!--SOCKS-->
+				<DestinationPort condition="is">1080</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090,technique_name=Proxy"> <!--Proxy-->
+				<DestinationPort condition="is">3128</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--IRC botnet C2-->
+				<DestinationPort condition="is">6667</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1071,technique_name=Application Layer Protocol"> <!--IRC TLS-->
+				<DestinationPort condition="is">6697</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking"> <!--Mining pool-->
+				<DestinationPort condition="is">3333</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking"> <!--Mining pool-->
+				<DestinationPort condition="is">5555</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking"> <!--Mining pool-->
+				<DestinationPort condition="is">7777</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1496.001,technique_name=Compute Hijacking"> <!--Mining pool-->
+				<DestinationPort condition="is">14444</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090.003,technique_name=Multi-hop Proxy"> <!--Tor-->
+				<DestinationPort condition="is">9001</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090.003,technique_name=Multi-hop Proxy"> <!--Tor-->
+				<DestinationPort condition="is">9030</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090.003,technique_name=Multi-hop Proxy"> <!--Tor SOCKS-->
+				<DestinationPort condition="is">9050</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1090.003,technique_name=Multi-hop Proxy"> <!--Tor Browser-->
+				<DestinationPort condition="is">9150</DestinationPort>
+				<Initiated condition="is">true</Initiated>
+			</Rule>
+		</NetworkConnect>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<NetworkConnect onmatch="exclude">
+			<!--Loopback-->
+			<DestinationIp condition="begin with">127.</DestinationIp>
+			<DestinationIp condition="is">::1</DestinationIp>
+			<!--Expected SMB/RPC clients (desktop file browsing, AD-joined servers)-->
+			<Image condition="end with">/gvfsd-smb</Image>
+			<Image condition="end with">/gvfsd-smb-browse</Image>
+			<Image condition="end with">/winbindd</Image>
+			<!--User-owned developer tooling-->
+			<Image condition="contains">/.vscode-server/</Image> <!--VS Code Remote server-->
+			<Image condition="contains">/.local/share/Steam/</Image>
+			<Image condition="contains">/tmp/.mount_</Image> <!--AppImages (desktop)-->
+		</NetworkConnect>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 4 : SYSMON SERVICE STATE CHANGE - cannot be filtered-->
+
+	<!--SYSMON EVENT ID 5 : PROCESS ENDED [ProcessTerminate]-->
+		<!--COMMENT:	Lifetime of processes from staging paths; security and logging agents ending (T1685).-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessTerminate onmatch="include">
+			<!--Staging locations (timeline context)-->
+			<Image name="Context: process from staging path" condition="begin with">/tmp/</Image> <!--World-writable temp-->
+			<Image name="Context: process from staging path" condition="begin with">/var/tmp/</Image> <!--World-writable temp, survives reboot-->
+			<Image name="Context: process from staging path" condition="begin with">/dev/shm/</Image> <!--RAM disk - classic malware staging-->
+			<Image name="Context: process from staging path" condition="begin with">/run/shm/</Image>
+			<Image name="Context: process from staging path" condition="begin with">/memfd:</Image> <!--Fileless execution from memory (memfd_create)-->
+			<!--Security and logging agents ending (also once per reboot - correlate with shutdown)-->
+			<Image name="technique_id=T1685.004,technique_name=Disable or Modify Linux Audit System Log" condition="end with">/auditd</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/rsyslogd</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/systemd-journald</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/sysmon</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/elastic-agent</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/filebeat</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/auditbeat</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/wazuh-agentd</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/falco</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/clamd</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/osqueryd</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/mdatp</Image>
+			<Image name="technique_id=T1685,technique_name=Disable or Modify Tools" condition="end with">/wdavdaemon</Image>
+		</ProcessTerminate>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 9 : RAW ACCESS READ [RawAccessRead]-->
+		<!--COMMENT:	OFF: blkid/fsck/LVM/udisks read block devices constantly. dd on /dev/sd* is visible in #1.-->
+	<RuleGroup name="" groupRelation="or">
+		<RawAccessRead onmatch="include"/>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 10 : PROCESS ACCESS [ProcessAccess]-->
+		<!--COMMENT:	Every ptrace attach: memory scraping of sshd/keyrings, injection (T1055.008). Rare on Linux, so log all.-->
+	<RuleGroup name="" groupRelation="or">
+		<ProcessAccess onmatch="include">
+			<SourceImage name="technique_id=T1055.008,technique_name=Ptrace System Calls" condition="contains">/</SourceImage> <!--Catch-all for tagging-->
+		</ProcessAccess>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 11 : FILE CREATED [FileCreate]-->
+		<!--COMMENT:	Persistence locations, accounts, privilege and authentication config, linker, kernel modules, webshells.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileCreate onmatch="include">
+			<!--Cron / at-->
+			<TargetFilename name="technique_id=T1053.003,technique_name=Cron" condition="is">/etc/crontab</TargetFilename>
+			<TargetFilename name="technique_id=T1053.003,technique_name=Cron" condition="begin with">/etc/cron.</TargetFilename> <!--cron.d, cron.hourly/daily/weekly/monthly-->
+			<TargetFilename name="technique_id=T1053.003,technique_name=Cron" condition="is">/etc/anacrontab</TargetFilename>
+			<TargetFilename name="technique_id=T1053.003,technique_name=Cron" condition="begin with">/var/spool/cron/</TargetFilename> <!--user crontabs (Debian: crontabs/, RHEL: directly)-->
+			<TargetFilename name="technique_id=T1053.002,technique_name=At" condition="begin with">/var/spool/at</TargetFilename>
+			<!--systemd units and timers (system and user)-->
+			<TargetFilename name="technique_id=T1053.006,technique_name=Systemd Timers" condition="end with">.timer</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/etc/systemd/system/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/etc/systemd/user/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/usr/lib/systemd/system/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/lib/systemd/system/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/usr/lib/systemd/user/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/run/systemd/system/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="contains">/.config/systemd/user/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/usr/lib/systemd/system-generators/</TargetFilename>
+			<TargetFilename name="technique_id=T1543.002,technique_name=Systemd Service" condition="begin with">/etc/systemd/system-generators/</TargetFilename>
+			<!--Init / RC scripts / login banners / dispatcher hooks-->
+			<TargetFilename name="technique_id=T1037.004,technique_name=RC Scripts" condition="begin with">/etc/init.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1037.004,technique_name=RC Scripts" condition="begin with">/etc/rc.local</TargetFilename>
+			<TargetFilename name="technique_id=T1037.004,technique_name=RC Scripts" condition="begin with">/etc/rc.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1037,technique_name=Boot or Logon Initialization Scripts" condition="begin with">/etc/update-motd.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1037,technique_name=Boot or Logon Initialization Scripts" condition="begin with">/etc/NetworkManager/dispatcher.d/</TargetFilename>
+			<!--Shell configuration (system and user)-->
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="is">/etc/profile</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="begin with">/etc/profile.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="is">/etc/bash.bashrc</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="is">/etc/bashrc</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="begin with">/etc/zsh/</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="is">/etc/environment</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.bashrc</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.bash_profile</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.bash_login</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.bash_logout</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.profile</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.zshrc</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.zprofile</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.zlogin</TargetFilename>
+			<TargetFilename name="technique_id=T1546.004,technique_name=Unix Shell Configuration Modification" condition="end with">/.zshenv</TargetFilename>
+			<!--Desktop autostart-->
+			<TargetFilename name="technique_id=T1547.013,technique_name=XDG Autostart Entries" condition="begin with">/etc/xdg/autostart/</TargetFilename>
+			<TargetFilename name="technique_id=T1547.013,technique_name=XDG Autostart Entries" condition="contains">/.config/autostart/</TargetFilename>
+			<!--SSH-->
+			<TargetFilename name="technique_id=T1098.004,technique_name=SSH Authorized Keys" condition="contains">/.ssh/authorized_keys</TargetFilename> <!--authorized_keys and authorized_keys2-->
+			<TargetFilename name="technique_id=T1098.004,technique_name=SSH Authorized Keys" condition="begin with">/etc/ssh/sshd_config</TargetFilename> <!--sshd_config and sshd_config.d/-->
+			<!--Accounts, sudo, PAM-->
+			<TargetFilename name="technique_id=T1136.001,technique_name=Local Account" condition="begin with">/etc/passwd</TargetFilename>
+			<TargetFilename name="technique_id=T1136.001,technique_name=Local Account" condition="begin with">/etc/shadow</TargetFilename>
+			<TargetFilename name="technique_id=T1136.001,technique_name=Local Account" condition="is">/etc/nshadow</TargetFilename> <!--shadow-utils temp file (RHEL)-->
+			<TargetFilename name="technique_id=T1136.001,technique_name=Local Account" condition="begin with">/etc/group</TargetFilename>
+			<TargetFilename name="technique_id=T1136.001,technique_name=Local Account" condition="begin with">/etc/gshadow</TargetFilename>
+			<TargetFilename name="technique_id=T1548.003,technique_name=Sudo and Sudo Caching" condition="begin with">/etc/sudoers</TargetFilename> <!--sudoers and sudoers.d/-->
+			<TargetFilename name="technique_id=T1556.003,technique_name=Pluggable Authentication Modules" condition="begin with">/etc/pam.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1556.003,technique_name=Pluggable Authentication Modules" condition="begin with">/lib/security/</TargetFilename>
+			<TargetFilename name="technique_id=T1556.003,technique_name=Pluggable Authentication Modules" condition="begin with">/lib64/security/</TargetFilename>
+			<TargetFilename name="technique_id=T1556.003,technique_name=Pluggable Authentication Modules" condition="begin with">/usr/lib64/security/</TargetFilename>
+			<TargetFilename name="technique_id=T1556.003,technique_name=Pluggable Authentication Modules" condition="contains all">/usr/lib/;-linux-gnu/security/</TargetFilename> <!--Debian/Ubuntu multiarch PAM modules-->
+			<!--Dynamic linker hijacking-->
+			<TargetFilename name="technique_id=T1574.006,technique_name=Dynamic Linker Hijacking" condition="is">/etc/ld.so.preload</TargetFilename>
+			<TargetFilename name="technique_id=T1574.006,technique_name=Dynamic Linker Hijacking" condition="begin with">/etc/ld.so.conf</TargetFilename> <!--ld.so.conf and ld.so.conf.d/-->
+			<!--Kernel modules: autoload config, and .ko files dropped outside the module tree-->
+			<TargetFilename name="technique_id=T1547.006,technique_name=Kernel Modules and Extensions" condition="begin with">/etc/modules</TargetFilename> <!--/etc/modules and /etc/modules-load.d/-->
+			<TargetFilename name="technique_id=T1547.006,technique_name=Kernel Modules and Extensions" condition="begin with">/etc/modprobe.d/</TargetFilename>
+			<Rule groupRelation="and" name="technique_id=T1547.006,technique_name=Kernel Modules and Extensions">
+				<TargetFilename condition="end with">.ko</TargetFilename>
+				<TargetFilename condition="not begin with">/lib/modules/</TargetFilename>
+				<TargetFilename condition="not begin with">/usr/lib/modules/</TargetFilename>
+			</Rule>
+			<!--udev, package manager hooks, Python startup hooks-->
+			<TargetFilename name="technique_id=T1546.017,technique_name=Udev Rules" condition="begin with">/etc/udev/rules.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1546.016,technique_name=Installer Packages" condition="begin with">/etc/apt/apt.conf.d/</TargetFilename>
+			<TargetFilename name="technique_id=T1546.016,technique_name=Installer Packages" condition="begin with">/etc/dnf/plugins/</TargetFilename>
+			<TargetFilename name="technique_id=T1546.016,technique_name=Installer Packages" condition="begin with">/etc/yum/pluginconf.d/</TargetFilename>
+			<Rule groupRelation="and" name="technique_id=T1546.018,technique_name=Python Startup Hooks"> <!--site-packages / dist-packages-->
+				<TargetFilename condition="end with">.pth</TargetFilename>
+				<TargetFilename condition="contains">-packages/</TargetFilename>
+			</Rule>
+			<!--Trust and name resolution-->
+			<TargetFilename name="technique_id=T1553.004,technique_name=Install Root Certificate" condition="begin with">/usr/local/share/ca-certificates/</TargetFilename>
+			<TargetFilename name="technique_id=T1553.004,technique_name=Install Root Certificate" condition="begin with">/etc/pki/ca-trust/source/anchors/</TargetFilename>
+			<TargetFilename name="technique_id=T1565.001,technique_name=Stored Data Manipulation" condition="is">/etc/hosts</TargetFilename>
+			<!--Audit configuration-->
+			<TargetFilename name="technique_id=T1685.004,technique_name=Disable or Modify Linux Audit System Log" condition="begin with">/etc/audit/</TargetFilename>
+			<!--Webshells (script files in web roots)-->
+			<Rule groupRelation="and" name="technique_id=T1505.003,technique_name=Web Shell">
+				<TargetFilename condition="begin with">/var/www/</TargetFilename>
+				<TargetFilename condition="contains any">.php;.phtml;.phar;.jsp;.jspx;.asp;.aspx;.cgi;.pl;.py;.war</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1505.003,technique_name=Web Shell">
+				<TargetFilename condition="begin with">/srv/www/</TargetFilename>
+				<TargetFilename condition="contains any">.php;.phtml;.phar;.jsp;.jspx;.asp;.aspx;.cgi;.pl;.py;.war</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1505.003,technique_name=Web Shell">
+				<TargetFilename condition="begin with">/usr/share/nginx/html/</TargetFilename>
+				<TargetFilename condition="contains any">.php;.phtml;.phar;.jsp;.jspx;.asp;.aspx;.cgi;.pl;.py;.war</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1505.003,technique_name=Web Shell">
+				<TargetFilename condition="begin with">/var/lib/tomcat</TargetFilename>
+				<TargetFilename condition="contains any">.php;.phtml;.phar;.jsp;.jspx;.asp;.aspx;.cgi;.pl;.py;.war</TargetFilename>
+			</Rule>
+			<!--Hidden files in temp locations (staging)-->
+			<TargetFilename name="technique_id=T1564.001,technique_name=Hidden Files and Directories" condition="begin with">/tmp/.</TargetFilename>
+			<TargetFilename name="technique_id=T1564.001,technique_name=Hidden Files and Directories" condition="begin with">/var/tmp/.</TargetFilename>
+		</FileCreate>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileCreate onmatch="exclude">
+			<!--Desktop temp noise in /tmp/.-->
+			<TargetFilename condition="contains">/.org.chromium.</TargetFilename>
+			<TargetFilename condition="contains">/.com.google.Chrome.</TargetFilename>
+			<TargetFilename condition="begin with">/tmp/.X11-unix/</TargetFilename>
+			<TargetFilename condition="begin with">/tmp/.ICE-unix/</TargetFilename>
+			<TargetFilename condition="begin with">/tmp/.font-unix/</TargetFilename>
+			<TargetFilename condition="begin with">/tmp/.X</TargetFilename> <!--X server lock files-->
+			<TargetFilename condition="begin with">/tmp/.mount_</TargetFilename> <!--AppImages-->
+			<!--Lock files of passwd/shadow tools (the real file change is logged)-->
+			<TargetFilename condition="end with">.lock</TargetFilename>
+		</FileCreate>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 16 : SYSMON CONFIGURATION CHANGE - cannot be filtered-->
+
+	<!--SYSMON EVENT ID 23 : FILE DELETE [FileDelete]-->
+		<!--COMMENT:	Narrow, logging only: logs, shell history, audit config, staging tools, backups.-->
+	<RuleGroup name="" groupRelation="or">
+		<FileDelete onmatch="include">
+			<!--Log files deleted (log rotation and journald are excluded below)-->
+			<TargetFilename name="technique_id=T1685.006,technique_name=Clear Linux or Mac System Logs" condition="begin with">/var/log/</TargetFilename>
+			<TargetFilename name="technique_id=T1685.004,technique_name=Disable or Modify Linux Audit System Log" condition="begin with">/etc/audit/</TargetFilename>
+			<!--Shell history deleted-->
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.bash_history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.zsh_history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.sh_history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.python_history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.mysql_history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.psql_history</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.lesshst</TargetFilename>
+			<TargetFilename name="technique_id=T1070.003,technique_name=Clear Command History" condition="end with">/.viminfo</TargetFilename>
+			<!--Attacker tool cleanup from staging folders-->
+			<Rule groupRelation="and" name="technique_id=T1070.004,technique_name=File Deletion">
+				<TargetFilename condition="begin with">/tmp/</TargetFilename>
+				<TargetFilename condition="contains any">.sh;.py;.pl;.elf;.so;.bin;.out</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1070.004,technique_name=File Deletion">
+				<TargetFilename condition="begin with">/var/tmp/</TargetFilename>
+				<TargetFilename condition="contains any">.sh;.py;.pl;.elf;.so;.bin;.out</TargetFilename>
+			</Rule>
+			<Rule groupRelation="and" name="technique_id=T1070.004,technique_name=File Deletion">
+				<TargetFilename condition="begin with">/dev/shm/</TargetFilename>
+				<TargetFilename condition="contains any">.sh;.py;.pl;.elf;.so;.bin;.out</TargetFilename>
+			</Rule>
+			<!--Backups destroyed (Veeam Linux repositories / agents)-->
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="end with">.vbk</TargetFilename>
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="end with">.vib</TargetFilename>
+			<TargetFilename name="technique_id=T1490,technique_name=Inhibit System Recovery" condition="end with">.vbm</TargetFilename>
+		</FileDelete>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<FileDelete onmatch="exclude">
+			<Image condition="end with">/logrotate</Image>
+			<Image condition="end with">/systemd/systemd-journald</Image>
+			<Image condition="end with">/systemd/systemd-tmpfiles</Image> <!--tmpfiles cleanup of /tmp-->
+			<Image condition="end with">/unattended-upgrade</Image>
+			<Image condition="end with">/bin/dpkg</Image>
+			<Image condition="end with">/bin/rpm</Image>
+		</FileDelete>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 100 : EBPF PROGRAM LOADED [eBPFEvent] (Linux only)-->
+		<!--COMMENT:	eBPF rootkits and kernel-level tampering (T1014). systemd, container runtimes, snapd and Sysmon itself load BPF programs legitimately.-->
+	<RuleGroup name="" groupRelation="or">
+		<eBPFEvent onmatch="include">
+			<Image name="technique_id=T1014,technique_name=Rootkit" condition="contains">/</Image> <!--Catch-all for tagging-->
+		</eBPFEvent>
+	</RuleGroup>
+	<RuleGroup name="" groupRelation="or">
+		<eBPFEvent onmatch="exclude">
+			<!--Legitimate BPF loaders (root-owned paths)-->
+			<Image condition="is">/usr/lib/systemd/systemd</Image> <!--cgroup device/IP filters per unit-->
+			<Image condition="is">/lib/systemd/systemd</Image> <!--cgroup device/IP filters per unit-->
+			<Image condition="end with">/systemd-networkd</Image>
+			<Image condition="end with">/systemd-resolved</Image>
+			<Image condition="end with">/systemd-oomd</Image>
+			<Image condition="end with">/runc</Image>
+			<Image condition="end with">/crun</Image>
+			<Image condition="end with">/dockerd</Image>
+			<Image condition="end with">/containerd</Image>
+			<Image condition="end with">/snap-confine</Image>
+			<Image condition="end with">/falco</Image>
+			<Image condition="end with">/tetragon</Image>
+			<Image condition="end with">/cilium-agent</Image>
+			<Image condition="is">/opt/sysmon/sysmon</Image> <!--Sysmon for Linux itself-->
+			<Image condition="begin with">/opt/Elastic/Endpoint/</Image> <!--Elastic Defend-->
+		</eBPFEvent>
+	</RuleGroup>
+
+	<!--SYSMON EVENT ID 255 : ERROR - cannot be filtered-->
+	</EventFiltering>
+</Sysmon>
